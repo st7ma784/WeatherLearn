@@ -305,7 +305,6 @@ class Pangu(pl.LightningModule):
         output = output.transpose(1, 2).reshape(B, -1, Pl, Lat, Lon)
         output_surface = output[:, :, 0, :, :]
         output_upper_air = output[:, :, 1:, :, :]
-
         output_surface = self.patchrecovery2d(output_surface)
         output_upper_air = self.patchrecovery3d(output_upper_air)
         return output_surface, output_upper_air

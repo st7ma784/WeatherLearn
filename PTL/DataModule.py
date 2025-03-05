@@ -14,12 +14,70 @@ class SuperDARNDataset(IterableDataset):
         self.minioClient = minioClient
     
 
-    def process_data(self, data1, data2):
+    def process_data(self, data1):
         #use pydarnio to read the datafiles and plot as arrays.
         #return the arrays
-                
-        return data1, data2
+        ## FITACF
+        # ptab: (8,)
+        # ltab: (24, 2)
+        # pwr0: (100,)
+        ## RAWACF
+        #ptab: (7,)
+        #ltab: (19, 2)
+        #slist: (70,)
+        #pwr0: (70,)
+        #acfd: (70, 18, 2)
+        #xcfd: (70, 18, 2)
 
+        #Grid data most useful 
+        #because it has the flow velocities in it . 
+        # \\luna.lancs.ac.uk\FST\PY\SPP\data\superdarn\new\cnvmap_TS18_range_limit\north\1999
+
+
+        # start.year: 2009
+        # start.month: 1
+        # start.day: 3
+        # start.hour: 1
+        # start.minute: 20
+        # start.second: 0.0
+        # end.year: 2009
+        # end.month: 1
+        # end.day: 3
+        # end.hour: 1
+        # end.minute: 22
+        # end.second: 0.0
+        # stid: (1,)
+        # channel: (1,)
+        # nvec: (1,)
+        # freq: (1,)
+        # major.revision: (1,)
+        # minor.revision: (1,)
+        # program.id: (1,)
+        # noise.mean: (1,)
+        # noise.sd: (1,)
+        # gsct: (1,)
+        # v.min: (1,)
+        # v.max: (1,)
+        # p.min: (1,)
+        # p.max: (1,)
+        # w.min: (1,)
+        # w.max: (1,)
+        # ve.min: (1,)
+        # ve.max: (1,)
+        # vector.mlat: (6,)
+        # vector.mlon: (6,)
+        # vector.kvect: (6,)
+        # vector.stid: (6,)
+        # vector.channel: (6,)
+        # vector.index: (6,)
+        # vector.vel.median: (6,)
+        # vector.vel.sd: (6,)
+        #idea one use mlat, mlon to gaussian splat onto a x,y grid and stack
+        #use grid index as collumn 
+        #
+
+        # return 2 adjacent time entries from the convmap file
+        return data
 
 
     def __len__(self):
@@ -30,21 +88,17 @@ class SuperDARNDataset(IterableDataset):
     #The data loading step will find sequential timestamps in the data, and load them into memory
     def __iter__(self):
         #Get the list of objects in the bucket
-        objects = self.minioClient.list_objects(self.minioBucket)
         #Iterate over the objects
         #sort the objects by name and take 2 adjacent objects at a time
         #yield the 2 objects as a tuple
-        for i in range(0, len(objects), 2):
+        for obj in self.minioClient.list_objects(self.minioBucket):
             #Get the object names
-            obj1 = objects[i].object_name
-            obj2 = objects[i+1].object_name
             #Get the data from the objects
-            data1 = self.minioClient.get_object(self.minioBucket, obj1)
-            data2 = self.minioClient.get_object(self.minioBucket, obj2)
+            data1 = self.minioClient.get_object(self.minioBucket, obj.object_name)
             #yield the data
-            data1,data2= self.process_data(data1, data2)
+            data1= self.process_data(data1
 
-            yield (data1, data2)    
+            yield data1    
 
 
 class DatasetFromMinioBucket(LightningDataModule):
