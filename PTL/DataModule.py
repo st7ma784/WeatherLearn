@@ -12,8 +12,13 @@ class SuperDARNDataset(IterableDataset):
         self.minioBucket = minioBucket
         self.batch_size = batch_size
         self.minioClient = minioClient
-    
+    def process_to_flat(self, data):
+        #use the index location as index_select into tensor of size (num_points, x)
 
+    def process_to_grid(self, data):
+        #use the mlat, mlon to gaussian splat onto a x,y grid and stack
+        #return the grid
+        pass
     def process_data(self, data1):
         #use pydarnio to read the datafiles and plot as arrays.
         #return the arrays
@@ -73,7 +78,7 @@ class SuperDARNDataset(IterableDataset):
         # vector.vel.median: (6,)
         # vector.vel.sd: (6,)
         #idea one use mlat, mlon to gaussian splat onto a x,y grid and stack
-        #use grid index as collumn 
+        #use grid index as collumn using np. index select onto a fixed size? whether flat or other? 
         #
 
         # return 2 adjacent time entries from the convmap file
@@ -96,7 +101,7 @@ class SuperDARNDataset(IterableDataset):
             #Get the data from the objects
             data1 = self.minioClient.get_object(self.minioBucket, obj.object_name)
             #yield the data
-            data1= self.process_data(data1
+            data1= self.process_data(data1)
 
             yield data1    
 
