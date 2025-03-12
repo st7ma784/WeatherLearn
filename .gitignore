@@ -17,3 +17,4 @@ finetune/input_data
 finetune/output_data
 finetune/target_data
 finetune/pangu_weather_1.onnx
+PTL/*.png
