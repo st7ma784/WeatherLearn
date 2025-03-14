@@ -114,6 +114,8 @@ class SuperDARNDataset(IterableDataset):
             if "vector.index" not in record:
                 print("Index not found in record", record)
                 continue
+            else :
+                print("Record found: ", record)
             if np.max(record["vector.index"]) > self.location["max_vector"]:
                 self.location.update({"max_vector":np.max(record["vector.index"])})
                 print("Max Vector Size now: ",self.location["max_vector"])
@@ -210,7 +212,7 @@ if __name__ == "__main__":
     import matplotlib.pyplot as plt
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--MINIOHost", type=str, default="localhost")
+    parser.add_argument("--MINIOHost", type=str, default="10.45.15.149")
     parser.add_argument("--MINIOPort", type=int, default=9000)
     parser.add_argument("--MINIOAccesskey", type=str, default="minioadmin")
     parser.add_argument("--MINIOSecret", type=str, default="minioadmin")
@@ -218,7 +220,7 @@ if __name__ == "__main__":
     parser.add_argument("--data_dir", type=str, default="data")
     parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--method", type=str, default="flat")
-    parser.add_argument("--window_size", type=int, default=100)
+    parser.add_argument("--window_size", type=int, default=120)
     args = parser.parse_args()
 
     minioClient = {"host": args.MINIOHost, "port": args.MINIOPort, "access_key": args.MINIOAccesskey
