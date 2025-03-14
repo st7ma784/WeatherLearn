@@ -181,6 +181,7 @@ class EarthSpecificBlock(nn.Module):
         x = self.pad(x.permute(0, 4, 1, 2, 3)).permute(0, 2, 3, 4, 1)
         _, Pl_pad, Lat_pad, Lon_pad, _ = x.shape
         shifted_x = self.negrollX(x)
+        print("Steves note: Unroll window_partition into nn.module for extra speed and use consistent shape: ", shifted_x.shape , self.window_size)
         x_windows = window_partition(shifted_x, self.window_size)
         # B*num_lon, num_pl*num_lat, win_pl, win_lat, win_lon, C
         win_pl, win_lat, win_lon = self.window_size
@@ -188,8 +189,10 @@ class EarthSpecificBlock(nn.Module):
         # B*num_lon, num_pl*num_lat, win_pl*win_lat*win_lon, C
         attn_windows = self.attn(x_windows)  # B*num_lon, num_pl*num_lat, win_pl*win_lat*win_lon, C
         attn_windows = attn_windows.view(attn_windows.shape[0], attn_windows.shape[1], win_pl, win_lat, win_lon, C)
+        print("Steves note: Unroll window_reverse into nn.module for extra speed and use consistent shape: ", attn_windows.shape , self.window_size)
         shifted_x = window_reverse(attn_windows, self.window_size, Pl_pad, Lat_pad, Lon_pad)
         shifted_x = self.posrollX(shifted_x)
+        print("Steves note: Unroll crop3d into nn.module for extra speed and use consistent shape: ", shifted_x.permute(0, 4, 1, 2, 3).shape , self.input_resolution)
         shifted_x = crop3d(shifted_x.permute(0, 4, 1, 2, 3), self.input_resolution).permute(0, 2, 3, 4, 1)
         shifted_x = shifted_x.reshape(B, Pl * Lat * Lon, C)
         shifted_x = shortcut + self.drop_path(shifted_x)

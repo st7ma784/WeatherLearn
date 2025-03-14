@@ -12,6 +12,9 @@ from pytorch_lightning.plugins.environments import SLURMEnvironment
 import os,sys
 from model import Pangu
 from DataModule import DatasetFromMinioBucket
+YOURPROJECTNAME="TestDeploy"
+WANDBUSER="st7ma784"
+NEPTUNEUSER="st7ma784"
 
 def train(config={
         "batch_size":16, # ADD MODEL ARGS HERE
@@ -386,11 +389,11 @@ if __name__== "__main__":
         # check for wandb login details in env vars
         if os.getenv("WANDB_API_KEY"):
             print("WANDB API KEY found")
-            trials= myparser.generate_wandb_trials(<WANDBUSER>,<YOURPROJECTNAME>)
+            trials= myparser.generate_wandb_trials(WANDBUSER,YOURPROJECTNAME)
         #check for neptune login details in env vars
         elif os.getenv("NEPTUNE_API_TOKEN"):
             print("NEPTUNE API KEY found")
-            trials= myparser.generate_neptune_trials(<NEPTUNEUSER>,<YOURPROJECTNAME>))
+            trials= myparser.generate_neptune_trials(NEPTUNEUSER,YOURPROJECTNAME)
         else:
             print("No logging API found, using default config")
             trials= hyperparams.generate_trials(NumTrials)  
