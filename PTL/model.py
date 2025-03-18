@@ -173,6 +173,7 @@ class EarthSpecificBlock(nn.Module):
         Pl, Lat, Lon = self.input_resolution
 
         print("Steves note: Unroll norm1 into nn.module for extra speed and use consistent shape: ", x.shape)
+        #torch.Size([22, 5, 300, 300])
         B, L, C = x.shape
         assert L == Pl * Lat * Lon, "input feature has wrong size"
         shortcut = x
@@ -293,8 +294,8 @@ class Pangu(pl.LightningModule):
         # upper_air = self.patchembed3d(upper_air)
 
         # x = torch.concat([surface.unsqueeze(2), upper_air], dim=2)
-        # B, C, Pl, Lat, Lon = x.shape
-        # x = x.reshape(B, C, -1).transpose(1, 2)
+        B, C, Pl, Lat, Lon = x.shape
+        x = x.reshape(B, C, -1).transpose(1, 2)
 
 
         x = self.layer1(x)
