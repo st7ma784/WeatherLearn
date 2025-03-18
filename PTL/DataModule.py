@@ -115,7 +115,7 @@ class SuperDARNDataset(IterableDataset):
             # print("vector mlat ",type(record["vector.mlat"]))
             # print("vector mlon",type(record["vector.mlon"]))
             if "vector.index" not in record:
-                print("Index not found in record", record)
+                print("Index not found in record")
                 continue
             # else :
             #     #rint("Record found: ", record)
