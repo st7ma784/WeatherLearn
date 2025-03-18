@@ -1,12 +1,10 @@
 import pytorch_lightning as pl
 import torch
-
 import torch.nn.functional as F
-import torch
 from torch import nn
 import numpy as np
 from timm.models.layers import trunc_normal_, DropPath
-from .utils import get_shift_window_mask, window_partition, window_reverse, PatchEmbed2D, PatchEmbed3D, PatchRecovery2D, PatchRecovery3D, get_pad3d, crop3d ,DownSample, UpSample, get_earth_position_index
+from utils import get_shift_window_mask, window_partition, window_reverse, PatchEmbed2D, PatchEmbed3D, PatchRecovery2D, PatchRecovery3D, get_pad3d, crop3d ,DownSample, UpSample, get_earth_position_index
 
 
 class EarthAttention3D(nn.Module):
@@ -125,6 +123,7 @@ class EarthSpecificBlock(nn.Module):
         self.mlp_ratio = mlp_ratio
 
         self.norm1 = norm_layer(dim)
+        print("Window size: ", window_size)
         padding = get_pad3d(input_resolution, window_size)
         self.pad = nn.ZeroPad3d(padding)
 
@@ -172,6 +171,8 @@ class EarthSpecificBlock(nn.Module):
         return torch.roll(x, shifts=(shift_pl, shift_lat, shift_lon), dims=(1, 2, 3))
     def forward(self, x: torch.Tensor):
         Pl, Lat, Lon = self.input_resolution
+
+        print("Steves note: Unroll norm1 into nn.module for extra speed and use consistent shape: ", x.shape)
         B, L, C = x.shape
         assert L == Pl * Lat * Lon, "input feature has wrong size"
         shortcut = x
@@ -211,8 +212,9 @@ class Pangu(pl.LightningModule):
         window_size (tuple[int]): Window size.
     """
 
-    def __init__(self, embed_dim=192, num_heads=(6, 12, 12, 6), window_size=(2, 6, 12)):
+    def __init__(self, embed_dim=192, num_heads=(6, 12, 12, 6), window_size=(2, 6, 12), **kwargs):
         super().__init__()
+        print("Steves note: window size is ", window_size)
         drop_path = np.linspace(0, 0.2, 8).tolist()
         self.criterion= torch.nn.MSELoss()
         self.L1Loss = torch.nn.L1Loss()
@@ -230,11 +232,11 @@ class Pangu(pl.LightningModule):
             embed_dim=embed_dim
         )
 
-        self.layer1 =  nn.Sequential([
+        self.layer1 =  nn.Sequential(*[
             EarthSpecificBlock(dim=embed_dim, input_resolution=(5,300,300), num_heads=num_heads[0], window_size=window_size,
                                shift_size=(0, 0, 0) if i % 2 == 0 else None, mlp_ratio=4., qkv_bias=True,
                                qk_scale=None, drop=0., attn_drop=0.,
-                               drop_path=drop_path[:2][i] if isinstance(drop_path, list) else drop_path[:2],
+                               drop_path=drop_path[2:][i] if isinstance(drop_path, list) else drop_path[2:],
                                norm_layer=nn.LayerNorm)
             for i in range(2)
         ])
@@ -242,16 +244,16 @@ class Pangu(pl.LightningModule):
         
         
         self.downsample = DownSample(in_dim=embed_dim, input_resolution=(5,300,300), output_resolution=(5, 150,150))
-        self.layer2 =nn.Sequential([
+        self.layer2 =nn.Sequential(*[
             EarthSpecificBlock(dim=embed_dim, input_resolution=(5, 150,150), num_heads=num_heads[1], window_size=window_size,
                                shift_size=(0, 0, 0) if i % 2 == 0 else None, mlp_ratio=4., qkv_bias=True,
                                qk_scale=None, drop=0., attn_drop=0.,
-                               drop_path=drop_path[:2][i] if isinstance(drop_path, list) else drop_path[:2],
+                               drop_path=drop_path[2:][i] if isinstance(drop_path, list) else drop_path[2:],
                                norm_layer=nn.LayerNorm)
             for i in range(6)
         ])
         
-        self.layer3 = nn.Sequential([
+        self.layer3 = nn.Sequential(*[
             EarthSpecificBlock(dim=embed_dim * 2, input_resolution=(5, 150,150), num_heads=num_heads[2], window_size=window_size,
                                shift_size=(0, 0, 0) if i % 2 == 0 else None, mlp_ratio=4., qkv_bias=True,
                                qk_scale=None, drop=0., attn_drop=0.,
@@ -262,7 +264,7 @@ class Pangu(pl.LightningModule):
         
         
         self.upsample = UpSample(embed_dim * 2, embed_dim, (5, 150,150), (5,300,300))
-        self.layer4 = nn.Sequential([
+        self.layer4 = nn.Sequential(*[
             EarthSpecificBlock(dim=embed_dim, input_resolution=(5,300,300), num_heads=num_heads[3], window_size=window_size,
                                shift_size=(0, 0, 0) if i % 2 == 0 else None, mlp_ratio=4., qkv_bias=True,
                                qk_scale=None, drop=0., attn_drop=0.,
@@ -275,24 +277,25 @@ class Pangu(pl.LightningModule):
         self.patchrecovery2d = PatchRecovery2D((300, 300), (4, 4), 2 * embed_dim, 4)
         self.patchrecovery3d = PatchRecovery3D((5,300,300), (2, 4, 4), 2 * embed_dim, 5)
 
-    def forward(self, surface, surface_mask, upper_air):
+    def forward(self, x):#, surface_mask, upper_air):
         """
         Args:
             surface (torch.Tensor): 2D n_lat=721, n_lon=1440, chans=4.
             surface_mask (torch.Tensor): 2D n_lat=721, n_lon=1440, chans=3.
             upper_air (torch.Tensor): 3D n_pl=13, n_lat=721, n_lon=1440, chans=5.
         """
-        surface = torch.concat([surface, surface_mask.unsqueeze(0)], dim=1)
-        B, C, H, W = surface.shape
-        assert H == self.patchembed2d.img_size[0] and W == self.patchembed2d.img_size[1], f"Input image size ({H}*{W}) doesn't match model ({self.img_size[0]}*{self.img_size[1]})."
-        surface = self.patchembed2d(surface)
-        B, C, L, H, W = upper_air.shape
-        assert L == self.patchembed3d.img_size[0] and H == self.patchembed3d.img_size[1] and W == self.patchembed3d.img_size[2], f"Input image size ({L}*{H}*{W}) doesn't match model ({self.img_size[0]}*{self.img_size[1]}*{self.img_size[2]})."
-        upper_air = self.patchembed3d(upper_air)
+        # surface = torch.concat([x, surface_mask.unsqueeze(0)], dim=1)
+        # B, C, H, W = surface.shape
+        # assert H == self.patchembed2d.img_size[0] and W == self.patchembed2d.img_size[1], f"Input image size ({H}*{W}) doesn't match model ({self.img_size[0]}*{self.img_size[1]})."
+        # surface = self.patchembed2d(surface)
+        # B, C, L, H, W = upper_air.shape
+        # assert L == self.patchembed3d.img_size[0] and H == self.patchembed3d.img_size[1] and W == self.patchembed3d.img_size[2], f"Input image size ({L}*{H}*{W}) doesn't match model ({self.img_size[0]}*{self.img_size[1]}*{self.img_size[2]})."
+        # upper_air = self.patchembed3d(upper_air)
 
-        x = torch.concat([surface.unsqueeze(2), upper_air], dim=2)
-        B, C, Pl, Lat, Lon = x.shape
-        x = x.reshape(B, C, -1).transpose(1, 2)
+        # x = torch.concat([surface.unsqueeze(2), upper_air], dim=2)
+        # B, C, Pl, Lat, Lon = x.shape
+        # x = x.reshape(B, C, -1).transpose(1, 2)
+
 
         x = self.layer1(x)
 

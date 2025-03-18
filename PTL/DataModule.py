@@ -6,7 +6,7 @@ from torch.utils.data import IterableDataset
 import pydarnio
 import numpy as np
 import datetime
-
+from minio import Minio
 
 
 def gaussian(x, y, x0, y0, sigma_x, sigma_y):
@@ -14,7 +14,7 @@ def gaussian(x, y, x0, y0, sigma_x, sigma_y):
 
 
 class SuperDARNDataset(IterableDataset):
-    def __init__(self,miniodict, minioBucket, batch_size, method='flat', window_size=10):
+    def __init__(self,miniodict, minioBucket, batch_size, method='flat', window_size=10, **kwargs):
         super().__init__()
         self.minioBucket = minioBucket
         self.batch_size = batch_size
@@ -48,11 +48,11 @@ class SuperDARNDataset(IterableDataset):
         #use the index location as index_select into tensor of size (num_points, x)
         data_tensor = torch.zeros(5, self.location["max_vector"]+1)
         for record in data:
-            if "vector.index" not in record:
-                print("Index not found in record")
-                continue
-            if np.max(record["vector.index"]) > self.location["max_vector"]:
-                print("Index out of bounds: ", record["vector.index"])
+            # if "vector.index" not in record:
+            #     print("Index not found in record")
+            #     continue
+            # if np.max(record["vector.index"]) > self.location["max_vector"]:
+            #     print("Index out of bounds: ", record["vector.index"])
             
             data_tensor[0, record["vector.index"]] = torch.tensor(record["vector.vel.median"])
             data_tensor[1, record["vector.index"]] = torch.tensor(record["vector.vel.sd"])
@@ -74,15 +74,18 @@ class SuperDARNDataset(IterableDataset):
         y = np.linspace(self.location["min_mlat"], self.location["max_mlat"], 300)
         X, Y = np.meshgrid(x, y)
         #step 2 : create a gaussian kernel
-        
+
         #step 3: splat the data onto the grid
         for record in data:
-            for j in range(0, len(record["vector.mlat"])):
-                data_tensor[0] += record["vector.vel.median"][j]*gaussian(X, Y, record["vector.mlon"][j], record["vector.mlat"][j], 1, 1)
-                data_tensor[1] += record["vector.vel.sd"][j]*gaussian(X, Y, record["vector.mlon"][j], record["vector.mlat"][j], 1, 1)
-                data_tensor[2] += record["vector.kvect"][j]*gaussian(X, Y, record["vector.mlon"][j], record["vector.mlat"][j], 1, 1)
-                data_tensor[3] += record["vector.stid"][j]*gaussian(X, Y, record["vector.mlon"][j], record["vector.mlat"][j], 1, 1)
-                data_tensor[4] += record["vector.channel"][j]*gaussian(X, Y, record["vector.mlon"][j], record["vector.mlat"][j], 1, 1)
+            if "vector.mlat" not in record:
+                print("vector.mlat not found in record")
+            else:
+                for j in range(0, len(record["vector.mlat"])):
+                    data_tensor[0] += record["vector.vel.median"][j]*gaussian(X, Y, record["vector.mlon"][j], record["vector.mlat"][j], 1, 1)
+                    data_tensor[1] += record["vector.vel.sd"][j]*gaussian(X, Y, record["vector.mlon"][j], record["vector.mlat"][j], 1, 1)
+                    data_tensor[2] += record["vector.kvect"][j]*gaussian(X, Y, record["vector.mlon"][j], record["vector.mlat"][j], 1, 1)
+                    data_tensor[3] += record["vector.stid"][j]*gaussian(X, Y, record["vector.mlon"][j], record["vector.mlat"][j], 1, 1)
+                    data_tensor[4] += record["vector.channel"][j]*gaussian(X, Y, record["vector.mlon"][j], record["vector.mlat"][j], 1, 1)
         return data_tensor
 
 
@@ -101,10 +104,10 @@ class SuperDARNDataset(IterableDataset):
             # print("End Time: ", end)
             if start < mindate:
                 mindate = start
-                print("Min Date now: ", mindate)
+                #rint("Min Date now: ", mindate)
             if end > maxdate:
                 maxdate = end
-                print("Max Date now: ", maxdate)
+                #rint("Max Date now: ", maxdate)
             # print("boundary lat : ", type(record["boundary.mlat"]))
             # print("boundary lon:", type(record["boundary.mlon"]))
             # print("model lat: ",type(record["model.mlat"]))
@@ -114,23 +117,23 @@ class SuperDARNDataset(IterableDataset):
             if "vector.index" not in record:
                 print("Index not found in record", record)
                 continue
-            else :
-                print("Record found: ", record)
+            # else :
+            #     #rint("Record found: ", record)
             if np.max(record["vector.index"]) > self.location["max_vector"]:
                 self.location.update({"max_vector":np.max(record["vector.index"])})
-                print("Max Vector Size now: ",self.location["max_vector"])
+                #rint("Max Vector Size now: ",self.location["max_vector"])
             if  np.max(record["vector.mlat"]) > self.location["max_mlat"]:
                 self.location.update({"max_mlat":np.max(record["vector.mlat"])})
-                print("Max Latitude now: ",self.location["max_mlat"])
+                #rint("Max Latitude now: ",self.location["max_mlat"])
             if  np.max(record["vector.mlon"]) > self.location["max_mlon"]:
                 self.location.update({"max_mlon":np.max(record["vector.mlon"])})
-                print("Max Longitude now: ",self.location["max_mlon"])
+                #rint("Max Longitude now: ",self.location["max_mlon"])
             if  np.min(record["vector.mlat"]) < self.location["min_mlat"]:
                 self.location.update({"min_mlat":np.min(record["vector.mlat"])})
-                print("Min Latitude now: ",self.location["min_mlat"])
+                #rint("Min Latitude now: ",self.location["min_mlat"])
             if np.min(record["vector.mlon"]) < self.location["min_mlon"]:
                 self.location.update({"min_mlon":np.min(record["vector.mlon"])})
-                print("Min Longitude now: ",self.location["min_mlon"])
+                #rint("Min Longitude now: ",self.location["min_mlon"])
 
         #step 2: pick a random span of time = 2*window_size minutes from the date range
         range = maxdate - mindate
@@ -178,14 +181,14 @@ class SuperDARNDataset(IterableDataset):
         return next(self.__iter__())
 
 class DatasetFromMinioBucket(LightningDataModule):
-    def __init__(self, minioClient, bucket_name, data_dir, batch_size, method='flat', window_size=10):
+    def __init__(self, minioClient, bucket_name, data_dir, batch_size, method='flat', windowMinutes=10, **kwargs):
         super().__init__()
         self.minioClient = minioClient
         self.bucket_name = bucket_name
         self.data_dir = data_dir
         self.batch_size = batch_size
         self.method = method
-        self.window_size = window_size
+        self.window_size = windowMinutes
 
     def prepare_data(self):
         # Download data from Minio bucket
@@ -193,7 +196,7 @@ class DatasetFromMinioBucket(LightningDataModule):
     
     def setup(self, stage=None):
         self.dataset=SuperDARNDataset(self.minioClient, self.bucket_name, self.batch_size, self.method, self.window_size)
-        self.train_dataset, self.val_dataset = torch.utils.data.random_split(self.dataset, [int(len(self.dataset)*0.8), int(len(self.dataset)*0.2)])
+        self.train_dataset, self.val_dataset = torch.utils.data.random_split(self.dataset, [int(len(self.dataset)*0.8), len(self.dataset)-int(len(self.dataset)*0.8)])
 
     def train_dataloader(self):
         #we CAN shuffle the dataset here, because each item includes timestep t and timestep t+1
@@ -219,14 +222,14 @@ if __name__ == "__main__":
     parser.add_argument("--bucket_name", type=str, default="convmap")
     parser.add_argument("--data_dir", type=str, default="data")
     parser.add_argument("--batch_size", type=int, default=4)
-    parser.add_argument("--method", type=str, default="flat")
-    parser.add_argument("--window_size", type=int, default=120)
+    parser.add_argument("--method", type=str, default="grid")
+    parser.add_argument("--WindowsMinutes", type=int, default=120)
     args = parser.parse_args()
 
     minioClient = {"host": args.MINIOHost, "port": args.MINIOPort, "access_key": args.MINIOAccesskey
                     , "secret_key": args.MINIOSecret} 
     
-    dataModule = DatasetFromMinioBucket(minioClient, args.bucket_name,args.data_dir, args.batch_size, args.method, args.window_size)
+    dataModule = DatasetFromMinioBucket(minioClient, args.bucket_name,args.data_dir, args.batch_size, args.method, args.WindowsMinutes)
     dataModule.prepare_data()
     dataModule.setup()
     for idx,batch in enumerate(dataModule.train_dataloader()):

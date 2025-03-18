@@ -85,7 +85,7 @@ class DownSample(nn.Module):
 
         pad_front = pad_back = 0
 
-        self.pad = nn.ZeroPad3d(
+        self.pad = torch.nn.ZeroPad3d(
             (pad_left, pad_right, pad_top, pad_bottom, pad_front, pad_back)
         )
 
@@ -156,6 +156,7 @@ def get_pad3d(input_resolution, window_size):
         padding (tuple[int]): (padding_left, padding_right, padding_top, padding_bottom, padding_front, padding_back)
     """
     Pl, Lat, Lon = input_resolution
+    print(window_size)
     win_pl, win_lat, win_lon = window_size
 
     padding_left = padding_right = padding_top = padding_bottom = padding_front = padding_back = 0
@@ -272,7 +273,7 @@ class PatchEmbed3D(nn.Module):
             padding_left = w_pad // 2
             padding_right = w_pad - padding_left
 
-        self.pad = nn.ZeroPad3d(
+        self.pad = torch.nn.ZeroPad3d(
             (padding_left, padding_right, padding_top, padding_bottom, padding_front, padding_back)
         )
         self.proj = nn.Conv3d(in_chans, embed_dim, kernel_size=patch_size, stride=patch_size)
