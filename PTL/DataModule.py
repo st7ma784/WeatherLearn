@@ -163,18 +163,20 @@ class SuperDARNDataset(IterableDataset):
     def __iter__(self):
         #returns an iterator over the objects in the bucket 
         while True:
-        
-            obj = next(self.generator)
-            #load the data from the object
-            #get file from minio into a byte stream
-            data = self.minioClient.get_object(self.minioBucket, obj.object_name)
-            #convert the byte stream into a list of pydarnio objects
-            file_stream = data.read()
-            reader = pydarnio.SDarnRead(file_stream,True)
-            data1=reader.read_map()
-            #process the data
-            yield self.process_data(data1)
-            
+            try:
+                obj = next(self.generator)
+                #load the data from the object
+                #get file from minio into a byte stream
+                data = self.minioClient.get_object(self.minioBucket, obj.object_name)
+                #convert the byte stream into a list of pydarnio objects
+                file_stream = data.read()
+                reader = pydarnio.SDarnRead(file_stream,True)
+                data1=reader.read_map()
+                #process the data
+                yield self.process_data(data1)
+            except Exception as e:
+                print(e)
+                pass
 
     def __getitem__(self, index):
         #return the data at the index
