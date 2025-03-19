@@ -175,7 +175,6 @@ class SuperDARNDataset(IterableDataset):
                 #process the data
                 yield self.process_data(data1)
             except Exception as e:
-                print(e)
                 pass
 
     def __getitem__(self, index):

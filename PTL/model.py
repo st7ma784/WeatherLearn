@@ -132,7 +132,7 @@ class EarthSpecificBlock(nn.Module):
         self.mlp_ratio = mlp_ratio
 
         self.norm1 = norm_layer(dim)
-        print("Window size: ", window_size)
+        # print("Window size: ", window_size)
         padding = get_pad3d(input_resolution, window_size)
         self.pad = nn.ZeroPad3d(padding)
 
@@ -141,7 +141,8 @@ class EarthSpecificBlock(nn.Module):
         pad_resolution[1] += (padding[2] + padding[3])
         pad_resolution[2] += (padding[0] + padding[1])
 
-
+        # self.WindowPartition=WindowPartition(inputshape,self.window_size)
+        # self.crop3d = Crop3D(inputshape, self.input_resolution)
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
         self.norm2 = norm_layer(dim)
         mlp_hidden_dim = int(dim * mlp_ratio)
@@ -193,6 +194,8 @@ class EarthSpecificBlock(nn.Module):
         shifted_x = self.negrollX(x)
         print("Steves note: Unroll window_partition into nn.module for extra speed and use consistent shape: ", shifted_x.shape , self.window_size)
         x_windows = window_partition(shifted_x, self.window_size)
+        # x_windows=self.WindowPartition(x_windows)
+
         # B*num_lon, num_pl*num_lat, win_pl, win_lat, win_lon, C
         win_pl, win_lat, win_lon = self.window_size
         x_windows = x_windows.view(x_windows.shape[0], x_windows.shape[1], win_pl * win_lat * win_lon, C)
