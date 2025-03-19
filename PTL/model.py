@@ -285,8 +285,8 @@ class Pangu(pl.LightningModule):
         ])
         
         # The outputs of the 2nd encoder layer and the 7th decoder layer are concatenated along the channel dimension.
-        self.patchrecovery2d = PatchRecovery2D((300, 300), (4, 4), 2 * embed_dim, 4)
-        self.patchrecovery3d = PatchRecovery3D((5,300,300), (2, 4, 4), 2 * embed_dim, 5)
+        self.patchrecovery2d = PatchRecovery2D((300, 300), (4, 4), 2 * embed_dim, 5)
+        # self.patchrecovery3d = PatchRecovery3D((5,300,300), (2, 4, 4), 2 * embed_dim, 5)
 
     def forward(self, x):#, surface_mask, upper_air):
         """
@@ -337,14 +337,17 @@ class Pangu(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         x, y = batch
         y_hat = self(x)
-        loss = F.mse_loss(y_hat, y)
+
+        loss = self.criterion(y_hat, y)
         self.log('train_loss', loss)
         return loss
 
     def validation_step(self, batch, batch_idx):
         x, y = batch
         y_hat = self(x)
-        loss = F.mse_loss(y_hat, y)
+        print("y_hat shape is ", y_hat.shape)
+        print("y shape is ", y.shape)
+        loss = self.criterion(y_hat, y)
         self.log('val_loss', loss)
         return loss
 
