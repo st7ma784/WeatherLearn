@@ -58,7 +58,7 @@ def train(config={
             #plugins=[SLURMEnvironment()],
             #https://lightning.ai/docs/pytorch/stable/clouds/cluster_advanced.html
             logger=logtool,
-            strategy='ddp',
+            strategy='ddp_find_unused_parameters_true', #given the size, we might need to split the model between GPUs instead of 
             # FSDPStrategy(accelerator="gpu",
             #                        parallel_devices= 1,
             #                        cluster_environment=SLURMEnvironment(),
@@ -248,8 +248,9 @@ class baseparser(HyperOptArgumentParser):
 
         super().__init__( *args,strategy=strategy, add_help=False) # or random search
         self.add_argument("--dir",default="./data",type=str)
-        self.opt_list("--learning_rate", default=0.0001, type=float, options=[2e-4,1e-4,5e-5,1e-5,4e-6], tunable=True)
-        self.opt_list("--batch_size", default=80, type=int)
+        self.opt_list("--learning_rate", default=0.00001, type=float, options=[2e-4,1e-4,5e-5,1e-5,4e-6], tunable=True)
+        self.opt_list("--embed_dim", default=64, type=int, options=[64,256,128,512,1024], tunable=True)
+        self.opt_list("--batch_size", default=8, type=int,options=[4,8,16,32],tunable=True)
         self.opt_list("--MINIOHost", type=str, default="10.45.15.149", tunable=False)
         self.opt_list("--MINIOPort", type=int, default=9000, tunable=False)
         self.opt_list("--MINIOAccesskey", type=str, default="minioadmin", tunable=False)
@@ -265,7 +266,7 @@ class baseparser(HyperOptArgumentParser):
         self.opt_list("--num_trials", default=0, type=int, tunable=False)
         #self.opt_range('--neurons', default=50, type=int, tunable=True, low=100, high=800, nb_samples=8, log_base=None)
         #This is important when passing arguments as **config in launcher
-        self.argNames=["dir","learning_rate","batch_size","precision","accelerator","num_trials","WindowsMinutes"]
+        self.argNames=["dir","learning_rate","batch_size","precision","accelerator","num_trials","WindowsMinutes","embed_dim"]
     def __dict__(self):
         return {k:self.parse_args().__dict__[k] for k in self.argNames}
 
@@ -357,7 +358,7 @@ if __name__== "__main__":
     myparser=parser()
     hyperparams = myparser.parse_args()
 
-    defaultConfig=hyperparams.__dict__
+    defaultConfig=hyperparams
 
     NumTrials=hyperparams.num_trials
     #BEDE has Env var containing hostname  #HOSTNAME=login2.bede.dur.ac.uk check we arent launching on this node
@@ -384,7 +385,7 @@ if __name__== "__main__":
             neptunetrain(defaultConfig)
         else:
             print("No logging API found, using default config")
-            train(defaultConfig)
+            train(defaultConfig.__dict__)
     #OR To run with Default Args
     else:
         # check for wandb login details in env vars

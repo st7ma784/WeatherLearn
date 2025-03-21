@@ -4,7 +4,7 @@ import torch.nn.functional as F
 from torch import nn
 import numpy as np
 from timm.models.layers import trunc_normal_, DropPath
-from utils import get_shift_window_mask, window_partition, window_reverse, PatchEmbed2D, PatchEmbed3D, PatchRecovery2D, PatchRecovery3D, get_pad3d, crop3d ,DownSample, UpSample, get_earth_position_index
+from utils import get_shift_window_mask, window_partition, window_reverse,WindowReverse,WindowPartition, PatchEmbed2D, PatchEmbed3D, PatchRecovery2D, PatchRecovery3D, get_pad3d, crop3d ,DownSample, UpSample, get_earth_position_index ,Crop3D
 
 
 class EarthAttention3D(nn.Module):
@@ -66,15 +66,15 @@ class EarthAttention3D(nn.Module):
             x: input features with shape of (B * num_lon, num_pl*num_lat, N, C)
             mask: (0/-inf) mask with shape of (num_lon, num_pl*num_lat, Wpl*Wlat*Wlon, Wpl*Wlat*Wlon)
         """
-        print("in EarthAttention3D, x shape is ", x.shape)
+        # print("in EarthAttention3D, x shape is ", x.shape)
         #B,13,144,E
         B_, nW_, N, C = x.shape
         qkv = self.qkv(x)
-        print("in EarthAttention3D, qkv shape is ", qkv.shape)
+        # print("in EarthAttention3D, qkv shape is ", qkv.shape)
         #B,13,144,3E
-        print("num_heads is ", self.num_heads)# 6
-        qkv=qkv.reshape(B_, nW_, N, 3, self.num_heads, C // self.num_heads)
-        print("in EarthAttention3D, qkv shape is now ", qkv.shape)
+        # print("num_heads is ", self.num_heads)# 6
+        qkv=qkv.unflatten(3,( 3, self.num_heads, C // self.num_heads))
+        # print("in EarthAttention3D, qkv shape is now ", qkv.shape)
         # B,13,144,
         qkv=qkv.permute(3, 0, 4, 1, 2, 5)
         q, k, v = qkv[0], qkv[1], qkv[2]
@@ -141,8 +141,10 @@ class EarthSpecificBlock(nn.Module):
         pad_resolution[1] += (padding[2] + padding[3])
         pad_resolution[2] += (padding[0] + padding[1])
 
-        # self.WindowPartition=WindowPartition(inputshape,self.window_size)
-        # self.crop3d = Crop3D(inputshape, self.input_resolution)
+        self.pad_resolution = pad_resolution
+        self.WindowPartition=WindowPartition((2,*self.pad_resolution,dim),self.window_size)# inputshap [2,2,56,64,128]
+        self.WindowReverse = WindowReverse(window_size,*self.pad_resolution,dim)#input shape = 8,7,2,8,16,128 
+        self.Crop3d = Crop3D(padding)# inputshape [2,128,2,56,64]
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
         self.norm2 = norm_layer(dim)
         mlp_hidden_dim = int(dim * mlp_ratio)
@@ -174,40 +176,25 @@ class EarthSpecificBlock(nn.Module):
     def negrollX(self, x: torch.Tensor):
         shift_pl, shift_lat, shift_lon = self.shift_size
         return torch.roll(x, shifts=(-shift_pl, -shift_lat, -shift_lon), dims=(1, 2, 3))
+    
     def null_rollX(self, x: torch.Tensor):
         return x
+    
     def posrollX(self, x: torch.Tensor):
         shift_pl, shift_lat, shift_lon = self.shift_size
         return torch.roll(x, shifts=(shift_pl, shift_lat, shift_lon), dims=(1, 2, 3))
+    
     def forward(self, x: torch.Tensor):
-        Pl, Lat, Lon = self.input_resolution
-
-        print("Steves note: Unroll norm1 into nn.module for extra speed and use consistent shape: ", x.shape)
-        B, L, C = x.shape
-        assert L == Pl * Lat * Lon, "input feature has wrong size"
+       
         shortcut = x
         x = self.norm1(x)
-        x = x.view(B, Pl, Lat, Lon, C)
-        # start pad
+        x=x.unflatten(1, self.input_resolution)
         x = self.pad(x.permute(0, 4, 1, 2, 3)).permute(0, 2, 3, 4, 1)
-        _, Pl_pad, Lat_pad, Lon_pad, _ = x.shape
-        shifted_x = self.negrollX(x)
-        print("Steves note: Unroll window_partition into nn.module for extra speed and use consistent shape: ", shifted_x.shape , self.window_size)
-        x_windows = window_partition(shifted_x, self.window_size)
-        # x_windows=self.WindowPartition(x_windows)
-
-        # B*num_lon, num_pl*num_lat, win_pl, win_lat, win_lon, C
-        win_pl, win_lat, win_lon = self.window_size
-        x_windows = x_windows.view(x_windows.shape[0], x_windows.shape[1], win_pl * win_lat * win_lon, C)
-        # B*num_lon, num_pl*num_lat, win_pl*win_lat*win_lon, C
-        attn_windows = self.attn(x_windows)  # B*num_lon, num_pl*num_lat, win_pl*win_lat*win_lon, C
-        attn_windows = attn_windows.view(attn_windows.shape[0], attn_windows.shape[1], win_pl, win_lat, win_lon, C)
-        print("Steves note: Unroll window_reverse into nn.module for extra speed and use consistent shape: ", attn_windows.shape , self.window_size)
-        shifted_x = window_reverse(attn_windows, self.window_size, Pl_pad, Lat_pad, Lon_pad)
+        x = self.negrollX(x)
+        shifted_x=self.WindowReverse(self.attn(self.WindowPartition(x)))
         shifted_x = self.posrollX(shifted_x)
-        print("Steves note: Unroll crop3d into nn.module for extra speed and use consistent shape: ", shifted_x.permute(0, 4, 1, 2, 3).shape , self.input_resolution)
-        shifted_x = crop3d(shifted_x.permute(0, 4, 1, 2, 3), self.input_resolution).permute(0, 2, 3, 4, 1)
-        shifted_x = shifted_x.reshape(B, Pl * Lat * Lon, C)
+        shifted_x= self.Crop3d(shifted_x)
+        shifted_x = shifted_x.flatten(1, 3)
         shifted_x = shortcut + self.drop_path(shifted_x)
         shifted_x = shifted_x + self.drop_path(self.mlp(self.norm2(shifted_x)))
         return shifted_x
@@ -224,12 +211,13 @@ class Pangu(pl.LightningModule):
         window_size (tuple[int]): Window size.
     """
 
-    def __init__(self, embed_dim=512, num_heads=(8, 16, 16, 8), window_size=(2, 8, 16), **kwargs):
+    def __init__(self, embed_dim=128, num_heads=(8, 16, 16, 8), window_size=(2, 8, 16), learning_rate=1e-4,**kwargs):
         #note num heads should share all factors with the embed_dim
         super().__init__()
-        print("Steves note: window size is ", window_size)
+        self.learning_rate=learning_rate
+        # print("Steves note: window size is ", window_size)
         drop_path = np.linspace(0, 0.2, 8).tolist()
-        self.criterion= torch.nn.MSELoss()
+        self.criterion= torch.nn.MSELoss(reduction='mean')
         self.L1Loss = torch.nn.L1Loss()
         # In addition, three constant masks(the topography mask, land-sea mask and soil type mask)
         self.patchembed2d = PatchEmbed2D(
@@ -247,11 +235,12 @@ class Pangu(pl.LightningModule):
 
         self.layer1 =  nn.Sequential(*[
             EarthSpecificBlock(dim=embed_dim, input_resolution=(1,75,75), num_heads=num_heads[0], window_size=window_size,
-                               shift_size=(0, 0, 0) if i % 2 == 0 else None, mlp_ratio=4., qkv_bias=True,
+                               shift_size=(0, 0, 0) if i % 2 == 0 else None, mlp_ratio=2., #default 4
+                               qkv_bias=True,
                                qk_scale=None, drop=0., attn_drop=0.,
                                drop_path=drop_path[2:][i] if isinstance(drop_path, list) else drop_path[2:],
                                norm_layer=nn.LayerNorm)
-            for i in range(2)
+            for i in range(2) #default 2
         ])
 
         
@@ -260,31 +249,34 @@ class Pangu(pl.LightningModule):
         #note that this changes the embed dim too from 512 to 1024? 
         self.layer2 =nn.Sequential(*[
             EarthSpecificBlock(dim=embed_dim*2, input_resolution=(1, 50,50), num_heads=num_heads[1], window_size=window_size,
-                               shift_size=(0, 0, 0) if i % 2 == 0 else None, mlp_ratio=4., qkv_bias=True,
+                               shift_size=(0, 0, 0) if i % 2 == 0 else None, mlp_ratio=2., #default 4
+                               qkv_bias=True,
                                qk_scale=None, drop=0., attn_drop=0.,
                                drop_path=drop_path[2:][i] if isinstance(drop_path, list) else drop_path[2:],
                                norm_layer=nn.LayerNorm)
-            for i in range(6)
+            for i in range(4) #should be 6
         ])
         
         self.layer3 = nn.Sequential(*[
             EarthSpecificBlock(dim=embed_dim * 2, input_resolution=(1, 50,50), num_heads=num_heads[2], window_size=window_size,
-                               shift_size=(0, 0, 0) if i % 2 == 0 else None, mlp_ratio=4., qkv_bias=True,
+                               shift_size=(0, 0, 0) if i % 2 == 0 else None, mlp_ratio=2., #default 4
+                               qkv_bias=True,
                                qk_scale=None, drop=0., attn_drop=0.,
                                drop_path=drop_path[2:][i] if isinstance(drop_path, list) else drop_path[2:],
                                norm_layer=nn.LayerNorm)
-            for i in range(6)
+            for i in range(4) #should be 6
         ])
         
         
         self.upsample = UpSample(embed_dim * 2, embed_dim, (1, 50,50), (1,75,75))
         self.layer4 = nn.Sequential(*[
             EarthSpecificBlock(dim=embed_dim, input_resolution=(1,75,75), num_heads=num_heads[3], window_size=window_size,
-                               shift_size=(0, 0, 0) if i % 2 == 0 else None, mlp_ratio=4., qkv_bias=True,
+                               shift_size=(0, 0, 0) if i % 2 == 0 else None, mlp_ratio=2., #default 4,
+                               qkv_bias=True,
                                qk_scale=None, drop=0., attn_drop=0.,
                                drop_path=drop_path[2:][i] if isinstance(drop_path, list) else drop_path[2:],
                                norm_layer=nn.LayerNorm)
-            for i in range(2)
+            for i in range(2) #default 2
         ])
         
         # The outputs of the 2nd encoder layer and the 7th decoder layer are concatenated along the channel dimension.
@@ -299,59 +291,50 @@ class Pangu(pl.LightningModule):
             upper_air (torch.Tensor): 3D n_pl=13, n_lat=721, n_lon=1440, chans=5.
         """
         # surface = torch.concat([x, surface_mask.unsqueeze(0)], dim=1)
-        B, C, H, W = x.shape
+        # B, C, H, W = x.shape
         #([B, 5, 300, 300])
         # assert H == self.patchembed2d.img_size[0] and W == self.patchembed2d.img_size[1], f"Input image size ({H}*{W}) doesn't match model ({self.img_size[0]}*{self.img_size[1]})."
-        x = self.patchembed2d(x).unsqueeze(2)
+        x = self.patchembed2d(x)
         # B, C, L, H, W = upper_air.shape
         # assert L == self.patchembed3d.img_size[0] and H == self.patchembed3d.img_size[1] and W == self.patchembed3d.img_size[2], f"Input image size ({L}*{H}*{W}) doesn't match model ({self.img_size[0]}*{self.img_size[1]}*{self.img_size[2]})."
         # upper_air = self.patchembed3d(upper_air)
 
         # x = torch.concat([surface.unsqueeze(2), upper_air], dim=2)
-        print(x.shape)
-        B, E, Pl, Lat, Lon = x.shape
-        x = x.reshape(B, E, -1).transpose(1, 2)
-        #X is shape B, 75*75, 512
-        print("PRe layer1 shape is ", x.shape)
+        # print(x.shape)
+        x = x.flatten(2,3).transpose(1, 2)
         x = self.layer1(x)
 
-        skip = x
+        skip = x  # I wonder whether this should be a hook? 
 
         x = self.downsample(x)
-        print("PRe layer2 shape is ", x.shape)
-        print("PRe skip shape is ", skip.shape)
         x = self.layer2(x)
-        print("PRe layer3 shape is ", x.shape)
         x = self.layer3(x)
         x = self.upsample(x)
-        print("PRe layer4 shape is ",
-              x.shape)
         x = self.layer4(x)
 
         output = torch.concat([x, skip], dim=-1)
-        output = output.transpose(1, 2).reshape(B, -1, Pl, Lat, Lon)
-        output_surface = output[:, :, 0, :, :]
+        output = output.transpose(1, 2).unflatten(2,(75, 75))
+        # output_surface = output[:, :, 0, :, :]
         # output_upper_air = output[:, :, 1:, :, :]
-        output_surface = self.patchrecovery2d(output_surface)
+        return self.patchrecovery2d(output)
         # output_upper_air = self.patchrecovery3d(output_upper_air)
-        return output_surface#, output_upper_air
+        # output_upper_air
 
     
     def training_step(self, batch, batch_idx):
         x, y = batch
         y_hat = self(x)
+        #could consider norming both of these given stacked gaussian pipelines
 
         loss = self.criterion(y_hat, y)
-        self.log('train_loss', loss)
+        self.log('train_loss', loss, on_step=True, on_epoch=True,prog_bar=True)
         return loss
 
     def validation_step(self, batch, batch_idx):
         x, y = batch
         y_hat = self(x)
-        print("y_hat shape is ", y_hat.shape)
-        print("y shape is ", y.shape)
         loss = self.criterion(y_hat, y)
-        self.log('val_loss', loss)
+        # self.log('val_loss', loss, on_step=True, on_epoch=True,prog_bar=True)
         return loss
 
     def test_step(self, batch, batch_idx):
@@ -362,6 +345,6 @@ class Pangu(pl.LightningModule):
         return loss
 
     def configure_optimizers(self):
-        optimizer = torch.optim.Adam(self.parameters(), lr=1e-3)
+        optimizer = torch.optim.Adam(self.parameters(), lr=self.learning_rate, weight_decay=1e-2)
         return optimizer
 

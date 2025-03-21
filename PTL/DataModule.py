@@ -31,7 +31,7 @@ class SuperDARNDataset(IterableDataset):
         buckets = self.minioClient.list_buckets()
         for bucket in buckets:
             print(bucket.name, bucket.creation_date)
-        self.generator= self.minioClient.list_objects(self.minioBucket)
+        self.generator= self.minioClient.list_objects(self.minioBucket,recursive=True)
         self.window_size = window_size
         self.method = method
         if self.method == 'flat':
@@ -78,7 +78,8 @@ class SuperDARNDataset(IterableDataset):
         #step 3: splat the data onto the grid
         for record in data:
             if "vector.mlat" not in record:
-                print("vector.mlat not found in record")
+                # print("vector.mlat not found in record")
+                continue
             else:
                 for j in range(0, len(record["vector.mlat"])):
                     data_tensor[0] += record["vector.vel.median"][j]*gaussian(X, Y, record["vector.mlon"][j], record["vector.mlat"][j], 1, 1)
@@ -115,7 +116,7 @@ class SuperDARNDataset(IterableDataset):
             # print("vector mlat ",type(record["vector.mlat"]))
             # print("vector mlon",type(record["vector.mlon"]))
             if "vector.index" not in record:
-                print("Index not found in record")
+                # print("Index not found in record")
                 continue
             # else :
             #     #rint("Record found: ", record)
@@ -156,7 +157,7 @@ class SuperDARNDataset(IterableDataset):
 
     def __len__(self):
         #Return the number of batches
-        return len(list(self.minioClient.list_objects(self.minioBucket))) // self.batch_size
+        return len(list(self.minioClient.list_objects(self.minioBucket)))
 
 
     #The data loading step will find sequential timestamps in the data, and load them into memory
@@ -165,16 +166,24 @@ class SuperDARNDataset(IterableDataset):
         while True:
             try:
                 obj = next(self.generator)
+
                 #load the data from the object
                 #get file from minio into a byte stream
-                data = self.minioClient.get_object(self.minioBucket, obj.object_name)
                 #convert the byte stream into a list of pydarnio objects
-                file_stream = data.read()
-                reader = pydarnio.SDarnRead(file_stream,True)
-                data1=reader.read_map()
-                #process the data
-                yield self.process_data(data1)
+                try:
+                    data = self.minioClient.get_object(self.minioBucket, obj.object_name)
+
+                    file_stream = data.read()
+                    reader = pydarnio.SDarnRead(file_stream,True)
+                    data1=reader.read_map()
+                    #process the data
+                    yield self.process_data(data1)
+                except Exception as e:
+                    print("Error: ", e)
+                    #remove the object from miniobucket
+                    self.minioClient.remove_object(self.minioBucket, obj.object_name)
             except Exception as e:
+                
                 pass
 
     def __getitem__(self, index):
@@ -201,7 +210,7 @@ class DatasetFromMinioBucket(LightningDataModule):
 
     def train_dataloader(self):
         #we CAN shuffle the dataset here, because each item includes timestep t and timestep t+1
-        return DataLoader(self.train_dataset, batch_size=self.batch_size, shuffle=True, num_workers=4, pin_memory=True)
+        return DataLoader(self.train_dataset, batch_size=self.batch_size, shuffle=False, num_workers=12, pin_memory=True,prefetch_factor=3)
     def val_dataloader(self):
         return DataLoader(self.val_dataset, batch_size=self.batch_size, shuffle=False, num_workers=4, pin_memory=True)
     def test_dataloader(self):

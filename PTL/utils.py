@@ -129,7 +129,7 @@ def crop3d(x: torch.Tensor, resolution):
         x (torch.Tensor): B, C, Pl, Lat, Lon
         resolution (tuple[int]): Pl, Lat, Lon
     """
-    _, _, Pl, Lat, Lon = x.shape
+    _,  Pl, Lat, Lon,_ = x.shape
     pl_pad = Pl - resolution[0]
     lat_pad = Lat - resolution[1]
     lon_pad = Lon - resolution[2]
@@ -142,26 +142,21 @@ def crop3d(x: torch.Tensor, resolution):
 
     padding_left = lon_pad // 2
     padding_right = lon_pad - padding_left
-    return x[:, :, padding_front: Pl - padding_back, padding_top: Lat - padding_bottom,
-           padding_left: Lon - padding_right]
+    return x[:, padding_front: Pl - padding_back, padding_top: Lat - padding_bottom,
+           padding_left: Lon - padding_right,:]
 class Crop3D(nn.Module):
-    def __init__(self, inputshape, resolution):
+    def __init__(self, padding):
         super().__init__()
-        self.inputshape = inputshape
-        self.resolution = resolution
-        self.pl_pad = inputshape[-3] - resolution[0]
-        self.lat_pad = inputshape[-2] - resolution[1]
-        self.lon_pad = inputshape[-1] - resolution[2]
-        self.padding_front = self.pl_pad // 2
-        self.padding_back = self.pl_pad - self.padding_front
-        self.padding_top = self.lat_pad // 2
-        self.padding_bottom = self.lat_pad - self.padding_top
-        self.padding_left = self.lon_pad // 2
-        self.padding_right = self.lon_pad - self.padding_left
+        self.padding_front , self.padding_back = padding[-1], padding[-2]
+        self.padding_top ,self.padding_bottom= padding[2] , padding[3]
+        self.padding_left,self.padding_right= padding[0] , padding[1]
+       
     def forward(self, x: torch.Tensor):
-        return x[:, :, self.padding_front: self.inputshape[-3] - self.padding_back,
-               self.padding_top: self.inputshape[-2] - self.padding_bottom,
-               self.padding_left: self.inputshape[-1] - self.padding_right]
+        return x[:,
+                self.padding_front: ,
+                self.padding_top: -self.padding_bottom,
+                self.padding_left: -self.padding_right, 
+                :]
 
 def get_pad3d(input_resolution, window_size):
     """
@@ -390,7 +385,7 @@ def window_partition(x: torch.Tensor, window_size):
     x = x.view(B, Pl // win_pl, win_pl, Lat // win_lat, win_lat, Lon // win_lon, win_lon, C)
     windows = x.permute(0, 5, 1, 3, 2, 4, 6, 7).contiguous().view(
         -1, (Pl // win_pl) * (Lat // win_lat), win_pl, win_lat, win_lon, C
-    )
+    ) 
     return windows
 
 class WindowPartition(nn.Module):
@@ -407,8 +402,8 @@ class WindowPartition(nn.Module):
         self.input_shape = input_shape
         self.window_size = window_size
         self.view_shape = (-1, (input_shape[1] // window_size[0]) * (input_shape[2] // window_size[1]),
-                           window_size[0], window_size[1], window_size[2], input_shape[-1])
-        self.xview_shape = (input_shape[0], input_shape[1] // window_size[0], window_size[0],
+                           window_size[0]* window_size[1]* window_size[2], input_shape[-1])
+        self.xview_shape = (-1, input_shape[1] // window_size[0], window_size[0],
                             input_shape[2] // window_size[1], window_size[1], input_shape[3] // window_size[2],
                             window_size[2], input_shape[-1])
     def forward(self, x: torch.Tensor):
@@ -426,22 +421,41 @@ class WindowPartition(nn.Module):
         return windows
     
 
-def window_reverse(windows, window_size, Pl, Lat, Lon):
+def window_reverse(windows, window_size, Pl, Lat, Lon,dim):
     """
     Args:
         windows: (B*num_lon, num_pl*num_lat, win_pl, win_lat, win_lon, C)
         window_size (tuple[int]): [win_pl, win_lat, win_lon]
-
+        dim: embedding size of the input tensor so we can use -1 for batch size in the view
     Returns:
         x: (B, Pl, Lat, Lon, C)
     """
     win_pl, win_lat, win_lon = window_size
-    B = int(windows.shape[0] / (Lon / win_lon))
-    x = windows.view(B, Lon // win_lon, Pl // win_pl, Lat // win_lat, win_pl, win_lat, win_lon, -1)
-    x = x.permute(0, 2, 4, 3, 5, 1, 6, 7).contiguous().view(B, Pl, Lat, Lon, -1)
+    # B = int(windows.shape[0] / (Lon / win_lon))
+    x = windows.view(-1, Lon // win_lon, Pl // win_pl, Lat // win_lat, win_pl, win_lat, win_lon, dim)
+    x = x.permute(0, 2, 4, 3, 5, 1, 6, 7).contiguous().view(-1, Pl, Lat, Lon, dim) 
     return x
-# -------------TO DO - Make this into a module with preset sizes
-# class WindowReverse(nn.Module):
+
+class WindowReverse(nn.Module):
+    def __init__(self, window_size,Pl,Lat,Lon,dim):
+        super().__init__()
+        self.window_size = window_size
+        self.Pl=Pl
+        self.Lat=Lat
+        self.Lon=Lon
+        self.windows_view_shape = (-1 ,Lon//window_size[2], Pl // window_size[0], Lat // window_size[1], window_size[0], window_size[1], window_size[2], dim)
+        self.xview_shape = (-1, self.Pl , self.Lat, self.Lon, dim)
+    def forward(self, windows: torch.Tensor):
+        """
+        Args:
+            windows: (B*num_lon, num_pl*num_lat, win_pl, win_lat, win_lon, C)
+
+        Returns:
+            x: (B, Pl, Lat, Lon, C)
+        """
+        x = windows.unflatten(2,self.window_size).view(*self.windows_view_shape)
+        x = x.permute(0, 2, 4, 3, 5, 1, 6, 7).contiguous().view(*self.xview_shape)
+        return x
 
 def get_shift_window_mask(input_resolution, window_size, shift_size):
     """
