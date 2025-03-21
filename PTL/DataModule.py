@@ -219,7 +219,10 @@ class DatasetFromMinioBucket(LightningDataModule):
         # Download data from Minio bucket
         if self.cache_to_disk:
             #download the data from the minio bucket to the path specified in data_dir
-
+            #check if list the directory is the same length as the minio buckets file list 
+            #if not, download the missing files using the method in MinioToDisk
+            from MinioToDisk import download_minio_bucket_to_folder
+            download_minio_bucket_to_folder(self.minioClient, self.bucket_name, self.data_dir)
         pass
     
     def setup(self, stage=None):
