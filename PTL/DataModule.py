@@ -14,6 +14,19 @@ def gaussian(x, y, x0, y0, sigma_x, sigma_y):
 
 
 class SuperDARNDataset(IterableDataset):
+
+    @classmethod
+    def from_disk(cls, data_dir, batch_size, method='flat', window_size=10, **kwargs):
+        #load the data from the disk
+        #data_dir is the path to the data
+        #batch_size is the batch size
+        #method is the method used to process the data
+        #window_size is the size of the window in minutes
+        #kwargs are the arguments to the dataloader
+        #overwrite the generator function to recursively list the files in the data_dir
+        #change the __iter__ function to read the files from the data_dir instead of minio
+        pass
+
     def __init__(self,miniodict, minioBucket, batch_size, method='flat', window_size=10, **kwargs):
         super().__init__()
         self.minioBucket = minioBucket
@@ -157,8 +170,12 @@ class SuperDARNDataset(IterableDataset):
 
     def __len__(self):
         #Return the number of batches
-        return len(list(self.minioClient.list_objects(self.minioBucket)))
+        return len(list(self.generator))
 
+    def process_file(self, data1):
+        file_stream = data1.read()
+        reader = pydarnio.SDarnRead(file_stream,True)
+        return reader.read_map()
 
     #The data loading step will find sequential timestamps in the data, and load them into memory
     def __iter__(self):
@@ -173,9 +190,7 @@ class SuperDARNDataset(IterableDataset):
                 try:
                     data = self.minioClient.get_object(self.minioBucket, obj.object_name)
 
-                    file_stream = data.read()
-                    reader = pydarnio.SDarnRead(file_stream,True)
-                    data1=reader.read_map()
+                    data1=self.process_file(data)
                     #process the data
                     yield self.process_data(data1)
                 except Exception as e:
@@ -199,13 +214,19 @@ class DatasetFromMinioBucket(LightningDataModule):
         self.batch_size = batch_size
         self.method = method
         self.window_size = windowMinutes
-
+        self.cache_to_disk = kwargs.get("cache_to_disk", False)
     def prepare_data(self):
         # Download data from Minio bucket
+        if self.cache_to_disk:
+            #download the data from the minio bucket to the path specified in data_dir
+
         pass
     
     def setup(self, stage=None):
-        self.dataset=SuperDARNDataset(self.minioClient, self.bucket_name, self.batch_size, self.method, self.window_size)
+        if not self.cache_to_disk:
+            self.dataset=SuperDARNDataset(self.minioClient, self.bucket_name, self.batch_size, self.method, self.window_size)
+        else: 
+            self.dataset = SuperDARNDataset.from_disk(self.data_dir, self.batch_size, self.method, self.window_size)
         self.train_dataset, self.val_dataset = torch.utils.data.random_split(self.dataset, [int(len(self.dataset)*0.8), len(self.dataset)-int(len(self.dataset)*0.8)])
 
     def train_dataloader(self):
