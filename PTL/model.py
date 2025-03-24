@@ -345,6 +345,9 @@ class Pangu(pl.LightningModule):
         #x,y, adn y_hat are all torch tensors of shape B,5,300,300
         # for each Item of B, plot the first 5 channels of x, y, and y_hat
         Batch_size= x.shape[0]
+        x=x.cpu().detach().numpy()
+        y=y.cpu().detach().numpy()
+        y_hat=y_hat.cpu().detach().numpy()
         for item in range(Batch_size):
             ax, fig = plt.subplots(3, 5)
             for i in range(5):
