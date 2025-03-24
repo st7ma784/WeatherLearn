@@ -2,6 +2,7 @@ import pytorch_lightning as pl
 import torch
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
+import os
 import wandb
 from torch import nn
 import numpy as np
@@ -348,6 +349,7 @@ class Pangu(pl.LightningModule):
         x=x.cpu().detach().numpy()
         y=y.cpu().detach().numpy()
         y_hat=y_hat.cpu().detach().numpy()
+        os.makedirs(f"results/{batch_idx}", exist_ok=True)
         for item in range(Batch_size):
             ax, fig = plt.subplots(3, 5)
             for i in range(5):
