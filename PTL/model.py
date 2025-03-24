@@ -359,7 +359,7 @@ class Pangu(pl.LightningModule):
             plt.savefig(f"results/{batch_idx}/{item}.png")
             plt.close()
         #log these plots to WandB
-        self.log({"examples": [wandb.Image(f"results/{batch_idx}/{item}.png") for item in range(Batch_size)]})
+        self.log_image({"examples": [wandb.Image(f"results/{batch_idx}/{item}.png") for item in range(Batch_size)]})
      
 
     def test_step(self, batch, batch_idx):
