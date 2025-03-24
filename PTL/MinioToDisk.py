@@ -54,13 +54,14 @@ if __name__ == "__main__":
     parser.add_argument("--port", type=int, default=9000, help="Minio server port")
     parser.add_argument("--access_key", type=str, default="minioadmin", help="Access key for Minio")
     parser.add_argument("--secret_key", type=str, default="minioadmin", help="Secret key for Minio")
-    parser.add_argument("--bucket", type=str, default="example-bucket", help="Name of the bucket to download")
-    parser.add_argument("--target_folder", type=str, default="./downloaded_data", help="Path to the local folder where files will be saved")
+    parser.add_argument("--bucket", type=str, default="convmap", help="Name of the bucket to download")
+    parser.add_argument("--target_folder", type=str, default="/tmp", help="Path to the local folder where files will be saved")
     args = parser.parse_args()
     minio_config = {
         "host": args.host,
         "port": args.port,
-        "access_key": args.access
+        "access_key": args.access_key,
+        "secret_key": args.secret_key
     }
     bucket_name = args.bucket
     target_folder = args.target_folder
