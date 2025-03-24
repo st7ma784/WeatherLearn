@@ -1,6 +1,8 @@
 import pytorch_lightning as pl
 import torch
 import torch.nn.functional as F
+import matplotlib.pyplot as plt
+import wandb
 from torch import nn
 import numpy as np
 from timm.models.layers import trunc_normal_, DropPath
@@ -334,8 +336,26 @@ class Pangu(pl.LightningModule):
         x, y = batch
         y_hat = self(x)
         loss = self.criterion(y_hat, y)
+        if batch_idx % 100 == 0:
+            self.plot_and_log_data(x, y, y_hat, batch_idx)
         # self.log('val_loss', loss, on_step=True, on_epoch=True,prog_bar=True)
         return loss
+
+    def plot_and_log_data(self, x, y, y_hat, batch_idx):
+        #x,y, adn y_hat are all torch tensors of shape B,5,300,300
+        # for each Item of B, plot the first 5 channels of x, y, and y_hat
+        Batch_size= x.shape[0]
+        for item in range(Batch_size):
+            ax, fig = plt.subplots(3, 5)
+            for i in range(5):
+                fig[0,i].imshow(x[item,i,:,:])
+                fig[1,i].imshow(y[item,i,:,:])
+                fig[2,i].imshow(y_hat[item,i,:,:])
+            plt.savefig(f"results/{batch_idx}/{item}.png")
+            plt.close()
+        #log these plots to WandB
+        self.log({"examples": [wandb.Image(f"results/{batch_idx}/{item}.png") for item in range(Batch_size)]})
+     
 
     def test_step(self, batch, batch_idx):
         x, y = batch

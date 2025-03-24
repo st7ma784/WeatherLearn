@@ -18,14 +18,27 @@ class SuperDARNDataset(IterableDataset):
     @classmethod
     def from_disk(cls, data_dir, batch_size, method='flat', window_size=10, **kwargs):
         #load the data from the disk
-        #data_dir is the path to the data
-        #batch_size is the batch size
-        #method is the method used to process the data
-        #window_size is the size of the window in minutes
-        #kwargs are the arguments to the dataloader
-        #overwrite the generator function to recursively list the files in the data_dir
-        #change the __iter__ function to read the files from the data_dir instead of minio
-        pass
+        self = cls.__new__(cls, {},"", batch_size, method, window_size, **kwargs)
+        
+        def generator(self):
+            import os
+            for root, dirs, files in os.walk(self.data_dir):
+                for file in files:
+                    yield open(os.path.join(root, file), "rb")
+
+        def __iter__(self):
+            for file in self.generator():
+                data1 = cls.process_file(file)
+                yield cls.process_data(data1)
+        self.generator = generator
+        self.__iter__ = __iter__
+        return self
+    
+    def __new__(cls, miniodict, minioBucket, batch_size, method='flat', window_size=10, **kwargs):
+        self = super().__new__(cls)
+        self.__init__(miniodict, minioBucket, batch_size, method, window_size, **kwargs)
+        return self
+
 
     def __init__(self,miniodict, minioBucket, batch_size, method='flat', window_size=10, **kwargs):
         super().__init__()
@@ -44,7 +57,6 @@ class SuperDARNDataset(IterableDataset):
         buckets = self.minioClient.list_buckets()
         for bucket in buckets:
             print(bucket.name, bucket.creation_date)
-        self.generator= self.minioClient.list_objects(self.minioBucket,recursive=True)
         self.window_size = window_size
         self.method = method
         if self.method == 'flat':
@@ -57,6 +69,10 @@ class SuperDARNDataset(IterableDataset):
                       "max_mlon":0, 
                       "min_mlat":360,
                       "min_mlon":360}
+    def generator(self):   
+        #return an iterator over the objects in the bucket
+        for obj in self.minioClient.list_objects(self.minioBucket):
+            yield obj
     def process_to_flat(self, data):
         #use the index location as index_select into tensor of size (num_points, x)
         data_tensor = torch.zeros(5, self.location["max_vector"]+1)
@@ -170,7 +186,7 @@ class SuperDARNDataset(IterableDataset):
 
     def __len__(self):
         #Return the number of batches
-        return len(list(self.generator))
+        return len(list(self.generator()))
 
     def process_file(self, data1):
         file_stream = data1.read()
@@ -182,7 +198,7 @@ class SuperDARNDataset(IterableDataset):
         #returns an iterator over the objects in the bucket 
         while True:
             try:
-                obj = next(self.generator)
+                obj = next(self.generator())
 
                 #load the data from the object
                 #get file from minio into a byte stream
