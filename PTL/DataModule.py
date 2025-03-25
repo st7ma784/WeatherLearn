@@ -7,6 +7,7 @@ import pydarnio
 import numpy as np
 import datetime
 from minio import Minio
+import os
 
 
 def gaussian(x, y, x0, y0, sigma_x, sigma_y):
@@ -18,19 +19,19 @@ class SuperDARNDataset(IterableDataset):
     @classmethod
     def from_disk(cls, data_dir, batch_size, method='flat', window_size=10, **kwargs):
         #load the data from the disk
-        self = cls.__new__(cls, {},"", batch_size, method, window_size, **kwargs)
+        self = cls.__new__(cls, {},"", batch_size, method, window_size, silent=True, **kwargs)
         
-        def generator(self):
+        def generator():
             import os
-            for root, dirs, files in os.walk(self.data_dir):
+            for root, dirs, files in os.walk(data_dir):
                 for file in files:
                     yield open(os.path.join(root, file), "rb")
-
-        def __iter__(self):
-            for file in self.generator():
-                data1 = cls.process_file(file)
-                yield cls.process_data(data1)
         self.generator = generator
+        def __iter__():
+            for file in self.generator():
+                data1 = self.process_file(file)
+                yield self.process_data(data1)
+        
         self.__iter__ = __iter__
         return self
     
@@ -44,19 +45,26 @@ class SuperDARNDataset(IterableDataset):
         super().__init__()
         self.minioBucket = minioBucket
         self.batch_size = batch_size
-
-        self.minioClient = Minio(miniodict.get("host", "localhost") + ":" 
+        self.grid_size = kwargs.get("grid_size", 300)
+        
+        try:
+            self.minioClient = Minio(miniodict.get("host", "localhost") + ":" 
                                                 + str(miniodict.get("port", 9000)),
                         access_key=miniodict.get("access_key", "minioadmin"),
                         secret_key=miniodict.get("secret_key", "minioadmin"),
                         secure=False)
+            self.miniodict = miniodict    
+            print("Buckets List:")
+            buckets = self.minioClient.list_buckets()
+            for bucket in buckets:
+                print(bucket.name, bucket.creation_date)
+        except Exception as e:
+            
+            if not kwargs.get("silent", False):
+                raise e
         print("Connected to Minio")
         #list the buckets   
 
-        print("Buckets List:")
-        buckets = self.minioClient.list_buckets()
-        for bucket in buckets:
-            print(bucket.name, bucket.creation_date)
         self.window_size = window_size
         self.method = method
         if self.method == 'flat':
@@ -95,12 +103,12 @@ class SuperDARNDataset(IterableDataset):
         
     def process_to_grid(self, data):
         #use the mlat, mlon to gaussian splat onto a x,y grid and stack
-        data_tensor = torch.zeros(5, 300, 300)
+        data_tensor = torch.zeros(5, self.grid_size, self.grid_size)
         #we're going to sample the data onto a 300x300 grid
         #we're going to use a gaussian kernel to splat the data onto the grid
         #step1: create a meshgrid
-        x = np.linspace(self.location["min_mlon"], self.location["max_mlon"], 300)
-        y = np.linspace(self.location["min_mlat"], self.location["max_mlat"], 300)
+        x = np.linspace(self.location["min_mlon"], self.location["max_mlon"], self.grid_size)
+        y = np.linspace(self.location["min_mlat"], self.location["max_mlat"], self.grid_size)
         X, Y = np.meshgrid(x, y)
         #step 2 : create a gaussian kernel
 
@@ -181,6 +189,10 @@ class SuperDARNDataset(IterableDataset):
             if d_start >= mid_point and d_end <= end:
                 data_at_time_t_plus_1.append(record)
 
+        ##
+        #TO DO: add retrieval for the corresponding time steps from GridGVec for pot_drop and latmin and latmax
+        ##
+
         return self.process_to_tensor(data_at_time_t), self.process_to_tensor(data_at_time_t_plus_1)
 
 
@@ -204,7 +216,11 @@ class SuperDARNDataset(IterableDataset):
                 #get file from minio into a byte stream
                 #convert the byte stream into a list of pydarnio objects
                 try:
-                    data = self.minioClient.get_object(self.minioBucket, obj.object_name)
+                    minioClient= Minio(self.miniodict.get("host", "localhost") + ":" + str(self.miniodict.get("port", 9000)),
+                        access_key=self.miniodict.get("access_key", "minioadmin"),
+                        secret_key=self.miniodict.get("secret_key", "minioadmin"),
+                        secure=False) 
+                    data = minioClient.get_object(self.minioBucket, obj.object_name)
 
                     data1=self.process_file(data)
                     #process the data
@@ -230,22 +246,32 @@ class DatasetFromMinioBucket(LightningDataModule):
         self.batch_size = batch_size
         self.method = method
         self.window_size = windowMinutes
-        self.cache_to_disk = kwargs.get("cache_to_disk", False)
+        self.cache_to_disk = kwargs.get("cache_first", False)
+        self.kwargs = kwargs
     def prepare_data(self):
         # Download data from Minio bucket
-        if self.cache_to_disk:
+        if self.cache_to_disk==True:
             #download the data from the minio bucket to the path specified in data_dir
+            if not os.path.exists(self.data_dir):
+                os.makedirs(self.data_dir)
+            file_count=len([files for root, dirs, files in os.walk(self.data_dir)])
+            MC= Minio(self.minioClient.get("host", "localhost") + ":" 
+                                                + str(self.minioClient.get("port", 9000)),
+                        access_key=self.minioClient.get("access_key", "minioadmin"),
+                        secret_key=self.minioClient.get("secret_key", "minioadmin"),
+                        secure=False)
+            if len(list(MC.list_objects(self.bucket_name, recursive=True))) != file_count:
+                from MinioToDisk import download_minio_bucket_to_folder
+                download_minio_bucket_to_folder(self.minioClient, self.bucket_name, self.data_dir)
             #check if list the directory is the same length as the minio buckets file list 
             #if not, download the missing files using the method in MinioToDisk
-            from MinioToDisk import download_minio_bucket_to_folder
-            download_minio_bucket_to_folder(self.minioClient, self.bucket_name, self.data_dir)
         pass
     
     def setup(self, stage=None):
         if not self.cache_to_disk:
-            self.dataset=SuperDARNDataset(self.minioClient, self.bucket_name, self.batch_size, self.method, self.window_size)
+            self.dataset=SuperDARNDataset(self.minioClient, self.bucket_name, self.batch_size, self.method, self.window_size, **self.kwargs)
         else: 
-            self.dataset = SuperDARNDataset.from_disk(self.data_dir, self.batch_size, self.method, self.window_size)
+            self.dataset = SuperDARNDataset.from_disk(self.data_dir, self.batch_size, self.method, self.window_size, **self.kwargs)
         self.train_dataset, self.val_dataset = torch.utils.data.random_split(self.dataset, [int(len(self.dataset)*0.8), len(self.dataset)-int(len(self.dataset)*0.8)])
 
     def train_dataloader(self):

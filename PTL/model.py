@@ -222,23 +222,26 @@ class Pangu(pl.LightningModule):
         drop_path = np.linspace(0, 0.2, 8).tolist()
         self.criterion= torch.nn.MSELoss(reduction='mean')
         self.L1Loss = torch.nn.L1Loss()
+        self.grid_size=kwargs.get("grid_size",300)
+        self.mlp_ratio=kwargs.get("mlp_ratio",4)
         # In addition, three constant masks(the topography mask, land-sea mask and soil type mask)
         self.patchembed2d = PatchEmbed2D(
-            img_size=(300, 300),
+            img_size=(self.grid_size, self.grid_size),
             patch_size=(4, 4),
             in_chans=5,  # add
             embed_dim=embed_dim,
         )
         self.patchembed3d = PatchEmbed3D(
-            img_size=(5, 300, 300),
+            img_size=(5, self.grid_size, self.grid_size),
             patch_size=(2, 4, 4),
             in_chans=5,
             embed_dim=embed_dim
         )
-
+        reduced_grid=(1, self.grid_size//4,self.grid_size//4)
+        further_reduced_grid=(1, self.grid_size//6,self.grid_size//6)
         self.layer1 =  nn.Sequential(*[
-            EarthSpecificBlock(dim=embed_dim, input_resolution=(1,75,75), num_heads=num_heads[0], window_size=window_size,
-                               shift_size=(0, 0, 0) if i % 2 == 0 else None, mlp_ratio=2., #default 4
+            EarthSpecificBlock(dim=embed_dim, input_resolution=reduced_grid, num_heads=num_heads[0], window_size=window_size,
+                               shift_size=(0, 0, 0) if i % 2 == 0 else None, mlp_ratio=self.mlp_ratio, #default 4
                                qkv_bias=True,
                                qk_scale=None, drop=0., attn_drop=0.,
                                drop_path=drop_path[2:][i] if isinstance(drop_path, list) else drop_path[2:],
@@ -248,11 +251,11 @@ class Pangu(pl.LightningModule):
 
         
         
-        self.downsample = DownSample(in_dim=embed_dim, input_resolution=(1,75,75), output_resolution=(1, 50,50))
+        self.downsample = DownSample(in_dim=embed_dim, input_resolution=reduced_grid, output_resolution=further_reduced_grid)
         #note that this changes the embed dim too from 512 to 1024? 
         self.layer2 =nn.Sequential(*[
-            EarthSpecificBlock(dim=embed_dim*2, input_resolution=(1, 50,50), num_heads=num_heads[1], window_size=window_size,
-                               shift_size=(0, 0, 0) if i % 2 == 0 else None, mlp_ratio=2., #default 4
+            EarthSpecificBlock(dim=embed_dim*2, input_resolution=further_reduced_grid, num_heads=num_heads[1], window_size=window_size,
+                               shift_size=(0, 0, 0) if i % 2 == 0 else None, mlp_ratio=self.mlp_ratio, #default 4
                                qkv_bias=True,
                                qk_scale=None, drop=0., attn_drop=0.,
                                drop_path=drop_path[2:][i] if isinstance(drop_path, list) else drop_path[2:],
@@ -261,8 +264,8 @@ class Pangu(pl.LightningModule):
         ])
         
         self.layer3 = nn.Sequential(*[
-            EarthSpecificBlock(dim=embed_dim * 2, input_resolution=(1, 50,50), num_heads=num_heads[2], window_size=window_size,
-                               shift_size=(0, 0, 0) if i % 2 == 0 else None, mlp_ratio=2., #default 4
+            EarthSpecificBlock(dim=embed_dim * 2, input_resolution=further_reduced_grid, num_heads=num_heads[2], window_size=window_size,
+                               shift_size=(0, 0, 0) if i % 2 == 0 else None, mlp_ratio=self.mlp_ratio, #default 4
                                qkv_bias=True,
                                qk_scale=None, drop=0., attn_drop=0.,
                                drop_path=drop_path[2:][i] if isinstance(drop_path, list) else drop_path[2:],
@@ -271,10 +274,10 @@ class Pangu(pl.LightningModule):
         ])
         
         
-        self.upsample = UpSample(embed_dim * 2, embed_dim, (1, 50,50), (1,75,75))
+        self.upsample = UpSample(embed_dim * 2, embed_dim, further_reduced_grid, reduced_grid)
         self.layer4 = nn.Sequential(*[
-            EarthSpecificBlock(dim=embed_dim, input_resolution=(1,75,75), num_heads=num_heads[3], window_size=window_size,
-                               shift_size=(0, 0, 0) if i % 2 == 0 else None, mlp_ratio=2., #default 4,
+            EarthSpecificBlock(dim=embed_dim, input_resolution=reduced_grid, num_heads=num_heads[3], window_size=window_size,
+                               shift_size=(0, 0, 0) if i % 2 == 0 else None, mlp_ratio=self.mlp_ratio, #default 4,
                                qkv_bias=True,
                                qk_scale=None, drop=0., attn_drop=0.,
                                drop_path=drop_path[2:][i] if isinstance(drop_path, list) else drop_path[2:],
@@ -283,7 +286,7 @@ class Pangu(pl.LightningModule):
         ])
         
         # The outputs of the 2nd encoder layer and the 7th decoder layer are concatenated along the channel dimension.
-        self.patchrecovery2d = PatchRecovery2D((300, 300), (4, 4), 2 * embed_dim, 5)
+        self.patchrecovery2d = PatchRecovery2D((self.grid_size, self.grid_size), (4, 4), 2 * embed_dim, 5)
         # self.patchrecovery3d = PatchRecovery3D((5,300,300), (2, 4, 4), 2 * embed_dim, 5)
 
     def forward(self, x):#, surface_mask, upper_air):
@@ -358,9 +361,9 @@ class Pangu(pl.LightningModule):
                 fig[2,i].imshow(y_hat[item,i,:,:])
             plt.savefig(f"results/{batch_idx}/{item}.png")
             plt.close()
-        #log these plots to WandB
-        self.log_image({"examples": [wandb.Image(f"results/{batch_idx}/{item}.png") for item in range(Batch_size)]})
-     
+        #log these plots to WandB using log_image function assumeing self.logger is WandB
+        if isinstance(self.logger, pl.loggers.wandb.WandbLogger):
+            self.logger.log_image("examples",[f"results/{batch_idx}/{item}.png" for item in range(Batch_size)])     
 
     def test_step(self, batch, batch_idx):
         x, y = batch

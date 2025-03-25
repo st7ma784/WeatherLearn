@@ -20,3 +20,4 @@ finetune/pangu_weather_1.onnx
 PTL/*.png
 PTL/lightning_logs/
 PTL/data/
+PTL/results/
