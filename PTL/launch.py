@@ -1,7 +1,7 @@
 from test_tube import HyperOptArgumentParser
 import wandb
 from tqdm import tqdm
-
+import datetime
 import pytorch_lightning
 from pytorch_lightning.callbacks import TQDMProgressBar,EarlyStopping
 import datetime
@@ -33,7 +33,7 @@ def train(config={
     if accelerator is None:
         accelerator=config.get("accelerator","auto")
     # print("Training with config: {}".format(config))
-    filename="model-{}".format(json.dumps(config))
+    filename="model-{}".format(datetime.datetime.now().strftime("%Y-%m-%d-%H-%M-%S"))
     callbacks=[
         TQDMProgressBar(),
         EarlyStopping(monitor="train_loss", mode="min",patience=10,check_finite=True,stopping_threshold=0.001),
@@ -261,7 +261,7 @@ class baseparser(HyperOptArgumentParser):
         self.opt_list("--data_dir", type=str, default="/data", tunable=False)
         self.opt_list("--method", type=str, default="grid",options=["flat","grid"], tunable=True)
         self.opt_list("--WindowsMinutes", type=int, default=120, tunable=True) #The number of minutes each snapshot represents
-        self.opt_list("--cache_first", type=bool, default=False, tunable=False)
+        self.opt_list("--cache_first", type=bool, default=True, tunable=False)
         self.opt_list("--mlp_ratio", type=int, default=4, options=[2,3,4,8], tunable=True)
         #INSERT YOUR OWN PARAMETERS HERE
         self.opt_list("--precision", default=16, options=[16], tunable=False)
@@ -269,9 +269,10 @@ class baseparser(HyperOptArgumentParser):
         self.opt_list("--num_trials", default=0, type=int, tunable=False)
         #self.opt_range('--neurons', default=50, type=int, tunable=True, low=100, high=800, nb_samples=8, log_base=None)
         #This is important when passing arguments as **config in launcher
-        self.argNames=["dir","learning_rate","batch_size","precision","grid_size","mlp_ratio","accelerator","num_trials","WindowsMinutes","embed_dim"]
-    def __dict__(self):
-        return {k:self.parse_args().__dict__[k] for k in self.argNames}
+        self.keys_of_interest=["dir","learning_rate","batch_size","precision","grid_size","mlp_ratio","accelerator","num_trials","WindowsMinutes","embed_dim"]
+        # self.argNames=["dir","learning_rate","batch_size","precision","grid_size","mlp_ratio","accelerator","num_trials","WindowsMinutes","embed_dim"]
+    # def __dict__(self):
+    #     return {k:self.parse_args().__dict__[k] for k in self.argNames}
 
 
 

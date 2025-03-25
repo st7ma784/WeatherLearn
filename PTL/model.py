@@ -217,6 +217,7 @@ class Pangu(pl.LightningModule):
     def __init__(self, embed_dim=128, num_heads=(8, 16, 16, 8), window_size=(2, 8, 16), learning_rate=1e-4,**kwargs):
         #note num heads should share all factors with the embed_dim
         super().__init__()
+        self.save_hyperparameters()
         self.learning_rate=learning_rate
         # print("Steves note: window size is ", window_size)
         drop_path = np.linspace(0, 0.2, 8).tolist()
