@@ -8,6 +8,7 @@ import datetime
 from pytorch_lightning.strategies import FSDPStrategy
 from pytorch_lightning.plugins.environments import SLURMEnvironment
 import os,sys
+import json
 from model import Pangu
 from DataModule import DatasetFromMinioBucket
 YOURPROJECTNAME="TestDeploy"
@@ -32,7 +33,7 @@ def train(config={
     if accelerator is None:
         accelerator=config.get("accelerator","auto")
     # print("Training with config: {}".format(config))
-    filename="model-{}".format(config["batch_size"])
+    filename="model-{}".format(json.dumps(config))
     callbacks=[
         TQDMProgressBar(),
         EarlyStopping(monitor="train_loss", mode="min",patience=10,check_finite=True,stopping_threshold=0.001),
