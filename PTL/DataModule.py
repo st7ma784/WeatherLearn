@@ -148,13 +148,7 @@ class SuperDARNDataset(IterableDataset):
                 #rint("Min Date now: ", mindate)
             if end > maxdate:
                 maxdate = end
-                #rint("Max Date now: ", maxdate)
-            # print("boundary lat : ", type(record["boundary.mlat"]))
-            # print("boundary lon:", type(record["boundary.mlon"]))
-            # print("model lat: ",type(record["model.mlat"]))
-            # print("model lon :" ,type(record["model.mlon"]))
-            # print("vector mlat ",type(record["vector.mlat"]))
-            # print("vector mlon",type(record["vector.mlon"]))
+
             if "vector.index" not in record:
                 # print("Index not found in record")
                 continue
@@ -217,13 +211,7 @@ class SuperDARNDataset(IterableDataset):
                 #rint("Min Date now: ", mindate)
             if end > maxdate:
                 maxdate = end
-                #rint("Max Date now: ", maxdate)
-            # print("boundary lat : ", type(record["boundary.mlat"]))
-            # print("boundary lon:", type(record["boundary.mlon"]))
-            # print("model lat: ",type(record["model.mlat"]))
-            # print("model lon :" ,type(record["model.mlon"]))
-            # print("vector mlat ",type(record["vector.mlat"]))
-            # print("vector mlon",type(record["vector.mlon"]))
+    
             if "vector.index" not in record:
                 # print("Index not found in record")
                 continue
@@ -288,10 +276,6 @@ class SuperDARNDataset(IterableDataset):
         while True:
             try:
                 obj = next(self.generator())
-
-                #load the data from the object
-                #get file from minio into a byte stream
-                #convert the byte stream into a list of pydarnio objects
                 try:
                     minioClient= Minio(self.miniodict.get("host", "localhost") + ":" + str(self.miniodict.get("port", 9000)),
                         access_key=self.miniodict.get("access_key", "minioadmin"),
@@ -304,7 +288,6 @@ class SuperDARNDataset(IterableDataset):
                     yield self.process_data(data1)
                 except Exception as e:
                     print("Error: ", e)
-                    #remove the object from miniobucket
                     self.minioClient.remove_object(self.minioBucket, obj.object_name)
             except Exception as e:
                 
@@ -337,7 +320,8 @@ class DatasetFromMinioBucket(LightningDataModule):
                         access_key=self.minioClient.get("access_key", "minioadmin"),
                         secret_key=self.minioClient.get("secret_key", "minioadmin"),
                         secure=False)
-            if len(list(MC.list_objects(self.bucket_name, recursive=True))) != file_count:
+            if len(list(MC.list_objects(self.bucket_name, recursive=True))) <= 0.9 * file_count:
+                # This is a down and dirty way to check the folders roughly the right size without interrogating fs structure
                 from MinioToDisk import download_minio_bucket_to_folder
                 download_minio_bucket_to_folder(self.minioClient, self.bucket_name, self.data_dir)
             #check if list the directory is the same length as the minio buckets file list 
