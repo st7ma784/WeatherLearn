@@ -29,8 +29,7 @@ class SuperDARNDataset(IterableDataset):
         self.generator = generator
         def __iter__():
             for file in self.generator():
-                data1 = self.process_file(file)
-                yield self.process_data(data1)
+                yield self.process_file(file)
         
         self.__iter__ = __iter__
         return self
@@ -68,9 +67,11 @@ class SuperDARNDataset(IterableDataset):
         self.window_size = window_size
         self.method = method
         if self.method == 'flat':
-            self.process_to_tensor = self.process_to_flat
+            self.process_conv_to_tensor = self.process_conv_to_flat
+            self.process_fitacf_to_tensor = self.process_fitacf_to_flat
         elif self.method == 'grid':
-            self.process_to_tensor = self.process_to_grid
+            self.process_conv_to_tensor = self.process_conv_to_grid
+            self.process_fitacf_to_tensor = self.process_fitacf_to_grid
         else:
             raise ValueError("method must be either 'flat' or 'grid'")
         self.location={"max_vector":88008, "max_mlat":0,
@@ -81,7 +82,13 @@ class SuperDARNDataset(IterableDataset):
         #return an iterator over the objects in the bucket
         for obj in self.minioClient.list_objects(self.minioBucket):
             yield obj
-    def process_to_flat(self, data):
+
+
+    def process_fitacf_to_grid(self, data):
+        pass
+    def process_fitacf_to_flat(self, data):
+        pass
+    def process_conv_to_flat(self, data):
         #use the index location as index_select into tensor of size (num_points, x)
         data_tensor = torch.zeros(5, self.location["max_vector"]+1)
         for record in data:
@@ -98,10 +105,8 @@ class SuperDARNDataset(IterableDataset):
             data_tensor[4, record["vector.index"]] = torch.tensor(record["vector.channel"]).to(torch.float)
 
         return data_tensor
-
-
         
-    def process_to_grid(self, data):
+    def process_conv_to_grid(self, data):
         #use the mlat, mlon to gaussian splat onto a x,y grid and stack
         data_tensor = torch.zeros(5, self.grid_size, self.grid_size)
         #we're going to sample the data onto a 300x300 grid
@@ -126,8 +131,73 @@ class SuperDARNDataset(IterableDataset):
                     data_tensor[4] += record["vector.channel"][j]*gaussian(X, Y, record["vector.mlon"][j], record["vector.mlat"][j], 1, 1)
         return data_tensor
 
+    def process_data_fitacf(self, data1):
+                #step 1: Load the date range from a north.grid file
+        #data1 = pydarnio.read_north_grd(data1)
+        mindate=datetime.datetime(2025, 1, 3, 1, 20, 0)
+        maxdate=datetime.datetime(1998,1,1,1,20,0)
 
-    def process_data(self, data1):
+        for record in data1:
+          
+            start = datetime.datetime(record["start.year"], record["start.month"], record["start.day"], record["start.hour"], record["start.minute"])
+            # print("Start Time: ", start)
+            end = datetime.datetime(record["end.year"], record["end.month"], record["end.day"], record["end.hour"], record["end.minute"])
+            # print("End Time: ", end)
+            if start < mindate:
+                mindate = start
+                #rint("Min Date now: ", mindate)
+            if end > maxdate:
+                maxdate = end
+                #rint("Max Date now: ", maxdate)
+            # print("boundary lat : ", type(record["boundary.mlat"]))
+            # print("boundary lon:", type(record["boundary.mlon"]))
+            # print("model lat: ",type(record["model.mlat"]))
+            # print("model lon :" ,type(record["model.mlon"]))
+            # print("vector mlat ",type(record["vector.mlat"]))
+            # print("vector mlon",type(record["vector.mlon"]))
+            if "vector.index" not in record:
+                # print("Index not found in record")
+                continue
+            # else :
+            #     #rint("Record found: ", record)
+            if np.max(record["vector.index"]) > self.location["max_vector"]:
+                self.location.update({"max_vector":np.max(record["vector.index"])})
+                #rint("Max Vector Size now: ",self.location["max_vector"])
+            if  np.max(record["vector.mlat"]) > self.location["max_mlat"]:
+                self.location.update({"max_mlat":np.max(record["vector.mlat"])})
+                #rint("Max Latitude now: ",self.location["max_mlat"])
+            if  np.max(record["vector.mlon"]) > self.location["max_mlon"]:
+                self.location.update({"max_mlon":np.max(record["vector.mlon"])})
+                #rint("Max Longitude now: ",self.location["max_mlon"])
+            if  np.min(record["vector.mlat"]) < self.location["min_mlat"]:
+                self.location.update({"min_mlat":np.min(record["vector.mlat"])})
+                #rint("Min Latitude now: ",self.location["min_mlat"])
+            if np.min(record["vector.mlon"]) < self.location["min_mlon"]:
+                self.location.update({"min_mlon":np.min(record["vector.mlon"])})
+                #rint("Min Longitude now: ",self.location["min_mlon"])
+
+        #step 2: pick a random span of time = 2*window_size minutes from the date range
+        range = maxdate - mindate
+        start = mindate + datetime.timedelta(minutes=np.random.randint(0, range.total_seconds()/(60*10))*10) #the factor of 10 is to ensure that the start time is a multiple of 10 minutes
+        end = start + datetime.timedelta(minutes=2*self.window_size)
+        mid_point= start + datetime.timedelta(minutes=self.window_size)
+        #step 3: find the data entries that are within the time span
+        data_at_time_t = []
+        data_at_time_t_plus_1 = []
+        for record in data1:
+            d_start = datetime.datetime(record["start.year"], record["start.month"], record["start.day"], record["start.hour"], record["start.minute"])
+            d_end = datetime.datetime(record["end.year"], record["end.month"], record["end.day"], record["end.hour"], record["end.minute"])
+            if d_start >= start and d_end <= mid_point:
+                data_at_time_t.append(record)
+            if d_start >= mid_point and d_end <= end:
+                data_at_time_t_plus_1.append(record)
+
+        ##
+        #TO DO: add retrieval for the corresponding time steps from GridGVec for pot_drop and latmin and latmax
+        ##
+
+        return self.process_to_tensor(data_at_time_t), self.process_to_tensor(data_at_time_t_plus_1)
+    def process_data_conv(self, data1):
 
         #step 1: Load the date range from a north.grid file
         #data1 = pydarnio.read_north_grd(data1)
@@ -193,7 +263,7 @@ class SuperDARNDataset(IterableDataset):
         #TO DO: add retrieval for the corresponding time steps from GridGVec for pot_drop and latmin and latmax
         ##
 
-        return self.process_to_tensor(data_at_time_t), self.process_to_tensor(data_at_time_t_plus_1)
+        return self.process_conv_to_tensor(data_at_time_t), self.process_conv_to_tensor(data_at_time_t_plus_1)
 
 
     def __len__(self):
@@ -203,7 +273,12 @@ class SuperDARNDataset(IterableDataset):
     def process_file(self, data1):
         file_stream = data1.read()
         reader = pydarnio.SDarnRead(file_stream,True)
-        return reader.read_map()
+        #do check for filetype  if its convmap then
+        # if reader.filetype == "convmap":
+        #     return self.process_data(reader.read_map())
+        # elif reader.filetype == "fitacf":
+        #     return self.process_data_fitacf(reader.read_fit())
+        return self.process_data_conv(reader.read_map())
 
     #The data loading step will find sequential timestamps in the data, and load them into memory
     def __iter__(self):
