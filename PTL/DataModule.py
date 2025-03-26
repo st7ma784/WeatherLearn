@@ -45,7 +45,7 @@ class SuperDARNDataset(IterableDataset):
         self.minioBucket = minioBucket
         self.batch_size = batch_size
         self.grid_size = kwargs.get("grid_size", 300)
-        
+        self.time_step=kwargs.get("time_step", 1)
         try:
             self.minioClient = Minio(miniodict.get("host", "localhost") + ":" 
                                                 + str(miniodict.get("port", 9000)),
