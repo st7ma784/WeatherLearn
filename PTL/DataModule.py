@@ -178,7 +178,9 @@ class SuperDARNDataset(IterableDataset):
 
         #step 2: pick a random span of time = 2*window_size minutes from the date range
         range = maxdate - mindate
-        start = mindate + datetime.timedelta(minutes=np.random.randint(0, range.total_seconds()/(60*10))*10) #the factor of 10 is to ensure that the start time is a multiple of 10 minutes
+        start = mindate + datetime.timedelta(minutes=np.random.randint(0, range.total_seconds()/(60*10))*10) 
+        #the factor of 10 is to ensure that the start time is a multiple of 10 minutes
+        #TO DO : this can be removed and replaced with some of the logic for self.time_step
         end = start + datetime.timedelta(minutes=2*self.window_size)
         mid_point= start + datetime.timedelta(minutes=self.window_size)
         #step 3: find the data entries that are within the time span
