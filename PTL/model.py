@@ -3,11 +3,10 @@ import torch
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
 import os
-import wandb
 from torch import nn
 import numpy as np
 from timm.models.layers import trunc_normal_, DropPath
-from utils import get_shift_window_mask, window_partition, window_reverse,WindowReverse,WindowPartition, PatchEmbed2D, PatchEmbed3D, PatchRecovery2D, PatchRecovery3D, get_pad3d, crop3d ,DownSample, UpSample, get_earth_position_index ,Crop3D
+from utils import get_shift_window_mask, WindowReverse,WindowPartition, PatchEmbed2D, PatchEmbed3D, PatchRecovery2D,  get_pad3d, DownSample, UpSample, get_earth_position_index ,Crop3D
 
 
 class EarthAttention3D(nn.Module):
@@ -192,6 +191,10 @@ class EarthSpecificBlock(nn.Module):
         shortcut = x
         x = self.norm1(x)
         x=x.unflatten(1, self.input_resolution)
+        ##
+        ##These padding, rolling and unrolling are a lot of the computational cost... I'm not sure if they are necessary
+        ##
+        
         x = self.pad(x.permute(0, 4, 1, 2, 3)).permute(0, 2, 3, 4, 1)
         x = self.negrollX(x)
         shifted_x=self.WindowReverse(self.attn(self.WindowPartition(x)))
@@ -261,7 +264,7 @@ class Pangu(pl.LightningModule):
                                qk_scale=None, drop=0., attn_drop=0.,
                                drop_path=drop_path[2:][i] if isinstance(drop_path, list) else drop_path[2:],
                                norm_layer=nn.LayerNorm)
-            for i in range(4) #should be 6
+            for i in range(6) #should be 6
         ])
         
         self.layer3 = nn.Sequential(*[
@@ -271,7 +274,7 @@ class Pangu(pl.LightningModule):
                                qk_scale=None, drop=0., attn_drop=0.,
                                drop_path=drop_path[2:][i] if isinstance(drop_path, list) else drop_path[2:],
                                norm_layer=nn.LayerNorm)
-            for i in range(4) #should be 6
+            for i in range(6) #should be 6
         ])
         
         
