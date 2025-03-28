@@ -405,7 +405,7 @@ if __name__== "__main__":
             trials= myparser.generate_neptune_trials(NEPTUNEUSER,YOURPROJECTNAME)
         else:
             print("No logging API found, using default config")
-            trials= hyperparams.generate_trials(NumTrials)  
+            trials= hyperparams.generate_trials()  
         for i,trial in enumerate(trials):
             command=SlurmRun(trial)
             slurm_cmd_script_path =  os.path.join(defaultConfig.get("dir","."),"slurm_cmdtrial{}.sh".format(i))

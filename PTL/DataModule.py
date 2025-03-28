@@ -311,7 +311,8 @@ class DatasetFromMinioBucket(LightningDataModule):
         self.kwargs = kwargs
     def prepare_data(self):
         # Download data from Minio bucket
-        if self.cache_to_disk==True and self.HPC==False:
+        if self.cache_to_disk==True and self.HPC==False: 
+            #if we are on HPC we dont want to pull from MINIO
             #download the data from the minio bucket to the path specified in data_dir
             if not os.path.exists(self.data_dir):
                 os.makedirs(self.data_dir)
