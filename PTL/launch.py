@@ -263,7 +263,7 @@ class baseparser(HyperOptArgumentParser):
         self.opt_list("--grid_size", type=int, default=300,options=[100,300,500,1000], tunable=True)
         self.opt_list("--data_dir", type=str, default="$global_scratch/convmap_data", tunable=False)
         self.opt_list("--method", type=str, default="grid",options=["flat","grid"], tunable=True)
-        self.opt_list("--WindowsMinutes", type=int, default=120,options=[10,20,30,60,90,120,240] tunable=True) #The number of minutes each snapshot represents
+        self.opt_list("--WindowsMinutes", type=int, default=120,options=[10,20,30,60,90,120,240], tunable=True) #The number of minutes each snapshot represents
         self.opt_list("--cache_first", type=bool, default=True, tunable=False)
         self.opt_list("--mlp_ratio", type=int, default=2, options=[2,3,4,8], tunable=True)
         #INSERT YOUR OWN PARAMETERS HERE
