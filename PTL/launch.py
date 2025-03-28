@@ -285,10 +285,10 @@ class parser(baseparser):
         super().__init__( *args,strategy=strategy, add_help=False,**kwargs) # or random search
         self.run_configs=set()
         self.keys=set()
-    def generate_trialset(self):
+    def generate_trials(self):
         hyperparams = self.parse_args()
         NumTrials=hyperparams.num_trials if hyperparams.num_trials>0 else 1
-        trials=hyperparams.generate_trials(NumTrials)
+        trials=super().generate_trials(NumTrials)
         return trials
     def generate_neptune_trials(self,project):
         #this function uses the nepune api to get the trials that exist, 
@@ -405,7 +405,7 @@ if __name__== "__main__":
             trials= myparser.generate_neptune_trials(NEPTUNEUSER,YOURPROJECTNAME)
         else:
             print("No logging API found, using default config")
-            trials= hyperparams.generate_trialset()  
+            trials= hyperparams.generate_trials()  
         for i,trial in enumerate(trials):
             command=SlurmRun(trial)
             slurm_cmd_script_path =  os.path.join(defaultConfig.__dict__.get("dir","."),"slurm_cmdtrial{}.sh".format(i))
