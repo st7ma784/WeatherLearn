@@ -10,7 +10,7 @@ import math
 
 
 
-def trunc_normal_(tensor, mean, std, a, b):
+def trunc_normal_(tensor,mean=0., std=1., a=-2., b=2.):
     # Cut & paste from PyTorch official master until it's in a few official releases - RW
     # Method based on https://people.sc.fsu.edu/~jburkardt/presentations/truncated_normal.pdf
     def norm_cdf(x):
