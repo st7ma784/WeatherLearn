@@ -249,7 +249,7 @@ class baseparser(HyperOptArgumentParser):
     def __init__(self,*args,strategy="random_search",**kwargs):
 
         super().__init__( *args,strategy=strategy, add_help=False) # or random search
-        self.add_argument("--dir",default="$global_scratch/convmap_data",type=str,)
+        self.add_argument("--dir",default=".",type=str,)
         self.opt_list("--learning_rate", default=0.00001, type=float, options=[2e-4,1e-4,5e-5,1e-5,4e-6], tunable=True)
         self.opt_list("--embed_dim", default=64, type=int, options=[64,256,128,512,1024], tunable=True)
         self.opt_list("--HPC", default=False, type=bool, tunable=False)
@@ -409,7 +409,7 @@ if __name__== "__main__":
         for i,trial in enumerate(trials):
             command=SlurmRun(trial)
             slurm_cmd_script_path =  os.path.join(defaultConfig.__dict__.get("dir","."),"slurm_cmdtrial{}.sh".format(i))
-
+            os.makedirs(defaultConfig.__dict__.get("dir","."),exist_ok=True)
             with open(slurm_cmd_script_path, "w") as f:
                 f.write(command)
             print('\nlaunching exp...')
