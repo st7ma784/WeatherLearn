@@ -41,10 +41,9 @@ class EarthAttention3D(nn.Module):
 
         self.type_of_windows = (input_resolution[0] // window_size[0]) * (input_resolution[1] // window_size[1])
 
-        self.earth_position_bias_table = nn.Parameter(
-            torch.zeros((window_size[0] ** 2) * (window_size[1] ** 2) * (window_size[2] * 2 - 1),
+        self.earth_position_bias_table = torch.zeros((window_size[0] ** 2) * (window_size[1] ** 2) * (window_size[2] * 2 - 1),
                         self.type_of_windows, num_heads)
-        )  # Wpl**2 * Wlat**2 * Wlon*2-1, Npl//Wpl * Nlat//Wlat, nH
+      # Wpl**2 * Wlat**2 * Wlon*2-1, Npl//Wpl * Nlat//Wlat, nH
 
         earth_position_index = get_earth_position_index(window_size)  # Wpl*Wlat*Wlon, Wpl*Wlat*Wlon
         self.register_buffer("earth_position_index", earth_position_index)
@@ -78,6 +77,8 @@ class EarthAttention3D(nn.Module):
         # Clamp to ensure it's in the proper range
         self.earth_position_bias_table.clamp_(min=a, max=b)
         self.softmax = nn.Softmax(dim=-1)
+
+        self.earth_position_bias_table= nn.Parameter(self.earth_position_bias_table, requires_grad=True)
     def forward_null(self, x: torch.Tensor, B_, nW_, N):
         return x
     def forward_mask(self, x: torch.Tensor, B_, nW_, N):
