@@ -221,7 +221,7 @@ def __get_hopt_params(trial):
     :return:
     """
     params = []
-    trial.update({"HPC":True})
+    trial.__dict__.update({"HPC":True})
     for k in trial.__dict__:
         v = trial.__dict__[k]
         if k == 'num_trials':
