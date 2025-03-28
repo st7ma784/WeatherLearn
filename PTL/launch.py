@@ -408,7 +408,7 @@ if __name__== "__main__":
             trials= hyperparams.generate_trialset()  
         for i,trial in enumerate(trials):
             command=SlurmRun(trial)
-            slurm_cmd_script_path =  os.path.join(defaultConfig.get("dir","."),"slurm_cmdtrial{}.sh".format(i))
+            slurm_cmd_script_path =  os.path.join(defaultConfig.__dict__.get("dir","."),"slurm_cmdtrial{}.sh".format(i))
 
             with open(slurm_cmd_script_path, "w") as f:
                 f.write(command)
