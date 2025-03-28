@@ -68,16 +68,9 @@ class EarthAttention3D(nn.Module):
             x: input features with shape of (B * num_lon, num_pl*num_lat, N, C)
             mask: (0/-inf) mask with shape of (num_lon, num_pl*num_lat, Wpl*Wlat*Wlon, Wpl*Wlat*Wlon)
         """
-        # print("in EarthAttention3D, x shape is ", x.shape)
-        #B,13,144,E
         B_, nW_, N, C = x.shape
         qkv = self.qkv(x)
-        # print("in EarthAttention3D, qkv shape is ", qkv.shape)
-        #B,13,144,3E
-        # print("num_heads is ", self.num_heads)# 6
         qkv=qkv.unflatten(3,( 3, self.num_heads, C // self.num_heads))
-        # print("in EarthAttention3D, qkv shape is now ", qkv.shape)
-        # B,13,144,
         qkv=qkv.permute(3, 0, 4, 1, 2, 5)
         q, k, v = qkv[0], qkv[1], qkv[2]
 

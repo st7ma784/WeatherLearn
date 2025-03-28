@@ -248,7 +248,7 @@ class baseparser(HyperOptArgumentParser):
     def __init__(self,*args,strategy="random_search",**kwargs):
 
         super().__init__( *args,strategy=strategy, add_help=False) # or random search
-        self.add_argument("--dir",default="/data",type=str)
+        self.add_argument("--dir",default="$global_scratch/convmap_data",type=str)
         self.opt_list("--learning_rate", default=0.00001, type=float, options=[2e-4,1e-4,5e-5,1e-5,4e-6], tunable=True)
         self.opt_list("--embed_dim", default=64, type=int, options=[64,256,128,512,1024], tunable=True)
         self.opt_list("--batch_size", default=6, type=int,options=[4,8,16,32,64],tunable=True)
@@ -259,7 +259,7 @@ class baseparser(HyperOptArgumentParser):
         self.opt_list("--bucket_name", type=str, default="convmap", tunable=False)
         self.opt_list("--time_step", type=int, default=1,options=[1], tunable=False)#currently not implemented in model
         self.opt_list("--grid_size", type=int, default=300,options=[100,300,500,1000], tunable=True)
-        self.opt_list("--data_dir", type=str, default="/data", tunable=False)
+        self.opt_list("--data_dir", type=str, default="$global_scratch/convmap_data", tunable=False)
         self.opt_list("--method", type=str, default="grid",options=["flat","grid"], tunable=True)
         self.opt_list("--WindowsMinutes", type=int, default=120, tunable=True) #The number of minutes each snapshot represents
         self.opt_list("--cache_first", type=bool, default=True, tunable=False)
