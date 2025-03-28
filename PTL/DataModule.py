@@ -307,10 +307,11 @@ class DatasetFromMinioBucket(LightningDataModule):
         self.method = method
         self.window_size = windowMinutes
         self.cache_to_disk = kwargs.get("cache_first", False)
+        self.HPC = kwargs.get("HPC", False)
         self.kwargs = kwargs
     def prepare_data(self):
         # Download data from Minio bucket
-        if self.cache_to_disk==True:
+        if self.cache_to_disk==True and self.HPC==False:
             #download the data from the minio bucket to the path specified in data_dir
             if not os.path.exists(self.data_dir):
                 os.makedirs(self.data_dir)

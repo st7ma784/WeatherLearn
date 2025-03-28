@@ -221,6 +221,7 @@ def __get_hopt_params(trial):
     :return:
     """
     params = []
+    trial.update({"HPC":True})
     for k in trial.__dict__:
         v = trial.__dict__[k]
         if k == 'num_trials':
@@ -251,6 +252,7 @@ class baseparser(HyperOptArgumentParser):
         self.add_argument("--dir",default="$global_scratch/convmap_data",type=str)
         self.opt_list("--learning_rate", default=0.00001, type=float, options=[2e-4,1e-4,5e-5,1e-5,4e-6], tunable=True)
         self.opt_list("--embed_dim", default=64, type=int, options=[64,256,128,512,1024], tunable=True)
+        self.opt_list("--HPC", default=False, type=bool, tunable=False)
         self.opt_list("--batch_size", default=6, type=int,options=[4,8,16,32,64],tunable=True)
         self.opt_list("--MINIOHost", type=str, default="10.48.163.59", tunable=False)
         self.opt_list("--MINIOPort", type=int, default=9000, tunable=False)
