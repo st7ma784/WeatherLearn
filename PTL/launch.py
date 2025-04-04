@@ -253,6 +253,7 @@ class baseparser(HyperOptArgumentParser):
         self.add_argument("--dir",default=".",type=str,)
         self.opt_list("--learning_rate", default=0.00001, type=float, options=[2e-4,1e-4,5e-5,1e-5,4e-6], tunable=True)
         self.opt_list("--embed_dim", default=64, type=int, options=[64,256,128,512,1024], tunable=True)
+        
         self.opt_list("--HPC", default=False, type=bool, tunable=False)
         self.opt_list("--batch_size", default=6, type=int,options=[4,8,16,32,64],tunable=True)
         self.opt_list("--MINIOHost", type=str, default="10.48.163.59", tunable=False)

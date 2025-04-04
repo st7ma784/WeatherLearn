@@ -231,7 +231,6 @@ class EarthSpecificBlock(nn.Module):
         ##
         ##These padding, rolling and unrolling are a lot of the computational cost... I'm not sure if they are necessary
         ##
-        
         x = self.pad(x.permute(0, 4, 1, 2, 3)).permute(0, 2, 3, 4, 1)
         x = self.negrollX(x)
         shifted_x=self.WindowReverse(self.attn(self.WindowPartition(x)))
@@ -241,6 +240,7 @@ class EarthSpecificBlock(nn.Module):
         shifted_x = shortcut + self.drop_path(shifted_x)
         shifted_x = shifted_x + self.drop_path(self.mlp(self.norm2(shifted_x)))
         return shifted_x
+    
 
 
 class Pangu(pl.LightningModule):
@@ -259,6 +259,7 @@ class Pangu(pl.LightningModule):
         super().__init__()
         self.save_hyperparameters()
         self.learning_rate=learning_rate
+        self.time_steps= kwargs.get("time_step", 1)
         # print("Steves note: window size is ", window_size)
         drop_path = np.linspace(0, 0.2, 8).tolist()
         self.criterion= torch.nn.MSELoss(reduction='mean')
@@ -337,40 +338,28 @@ class Pangu(pl.LightningModule):
             surface_mask (torch.Tensor): 2D n_lat=721, n_lon=1440, chans=3.
             upper_air (torch.Tensor): 3D n_pl=13, n_lat=721, n_lon=1440, chans=5.
         """
-        # surface = torch.concat([x, surface_mask.unsqueeze(0)], dim=1)
-        # B, C, H, W = x.shape
-        #([B, 5, 300, 300])
-        # assert H == self.patchembed2d.img_size[0] and W == self.patchembed2d.img_size[1], f"Input image size ({H}*{W}) doesn't match model ({self.img_size[0]}*{self.img_size[1]})."
-        x = self.patchembed2d(x)
-        # B, C, L, H, W = upper_air.shape
-        # assert L == self.patchembed3d.img_size[0] and H == self.patchembed3d.img_size[1] and W == self.patchembed3d.img_size[2], f"Input image size ({L}*{H}*{W}) doesn't match model ({self.img_size[0]}*{self.img_size[1]}*{self.img_size[2]})."
-        # upper_air = self.patchembed3d(upper_air)
-
-        # x = torch.concat([surface.unsqueeze(2), upper_air], dim=2)
-        # print(x.shape)
-        x = x.flatten(2,3).transpose(1, 2)
+        
         x = self.layer1(x)
-
         skip = x  # I wonder whether this should be a hook? 
-
         x = self.downsample(x)
         x = self.layer2(x)
         x = self.layer3(x)
         x = self.upsample(x)
         x = self.layer4(x)
 
-        output = torch.concat([x, skip], dim=-1)
-        output = output.transpose(1, 2).unflatten(2,(75, 75))
-        # output_surface = output[:, :, 0, :, :]
-        # output_upper_air = output[:, :, 1:, :, :]
-        return self.patchrecovery2d(output)
-        # output_upper_air = self.patchrecovery3d(output_upper_air)
-        # output_upper_air
+        return torch.concat([x, skip], dim=-1)
 
     
     def training_step(self, batch, batch_idx):
         x, y = batch
-        y_hat = self(x)
+        
+        x = self.patchembed2d(x)
+        x = x.flatten(2,3).transpose(1, 2)
+        for t in range(self.time_steps):
+            x = self(x)
+        output = output.transpose(1, 2).unflatten(2,(75, 75))
+
+        y_hat = self.patchrecovery2d(x)
         #could consider norming both of these given stacked gaussian pipelines
 
         loss = self.criterion(y_hat, y)

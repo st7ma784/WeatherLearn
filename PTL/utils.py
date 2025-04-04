@@ -168,7 +168,6 @@ def get_pad3d(input_resolution, window_size):
         padding (tuple[int]): (padding_left, padding_right, padding_top, padding_bottom, padding_front, padding_back)
     """
     Pl, Lat, Lon = input_resolution
-    print(window_size)
     win_pl, win_lat, win_lon = window_size
 
     padding_left = padding_right = padding_top = padding_bottom = padding_front = padding_back = 0
