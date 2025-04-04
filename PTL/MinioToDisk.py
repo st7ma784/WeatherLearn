@@ -16,6 +16,7 @@ def download_minio_bucket_to_folder(minio_config, bucket_name, target_folder):
         bucket_name (str): Name of the bucket to download.
         target_folder (str): Path to the local folder where files will be saved.
     """
+    # print(f"Downloading from bucket: {bucket_name} to folder: {target_folder}")
     # Create Minio client
     minio_client = Minio(
         f"{minio_config.get('host', 'localhost')}:{minio_config.get('port', 9000)}",
@@ -34,12 +35,13 @@ def download_minio_bucket_to_folder(minio_config, bucket_name, target_folder):
             os.makedirs(os.path.dirname(local_file_path), exist_ok=True)
             # Download the object
             minio_client.fget_object(bucket_name, object_path, local_file_path)
-            print(f"Downloaded: {object_path} -> {local_file_path}")
+            # print(f"Downloaded: {object_path} -> {local_file_path}")
         except S3Error as e:
             print(f"Error occurred while downloading {obj.object_name}: {e}")
 
     # List and download all objects in the bucket using multithreading
     try:
+        # print("Starting download...")
         with ThreadPoolExecutor(max_workers=8) as executor:  # Adjust max_workers as needed
             executor.map(download_object, minio_client.list_objects(bucket_name, recursive=True))
     except S3Error as e:

@@ -21,3 +21,4 @@ PTL/*.png
 PTL/lightning_logs/
 PTL/data/
 PTL/results/
+PTL/wandb/

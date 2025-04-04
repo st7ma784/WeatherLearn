@@ -1,14 +1,12 @@
 from test_tube import HyperOptArgumentParser
 import wandb
+import torch
 from tqdm import tqdm
 import datetime
 import pytorch_lightning
 from pytorch_lightning.callbacks import TQDMProgressBar,EarlyStopping
 import datetime
-from pytorch_lightning.strategies import FSDPStrategy
-from pytorch_lightning.plugins.environments import SLURMEnvironment
 import os,sys
-import json
 from model import Pangu
 from DataModule import DatasetFromMinioBucket
 YOURPROJECTNAME="TestDeploy"
@@ -25,8 +23,8 @@ def train(config={
     
     minioClient = {"host": config["MINIOHost"], "port": config["MINIOPort"], "access_key": config["MINIOAccesskey"]
                     , "secret_key": config["MINIOSecret"]}
-    config["minioClient"]=minioClient
-    model=Pangu(  **config)
+    config.update({"minioClient": minioClient})
+    model=Pangu(**config)
     dataModule=DatasetFromMinioBucket(**config)
     if devices is None:
         devices=config.get("devices","auto")
@@ -59,7 +57,7 @@ def train(config={
             #plugins=[SLURMEnvironment()],
             #https://lightning.ai/docs/pytorch/stable/clouds/cluster_advanced.html
             logger=logtool,
-            strategy='ddp_find_unused_parameters_true', #given the size, we might need to split the model between GPUs instead of 
+            # strategy='ddp_find_unused_parameters_true', #given the size, we might need to split the model between GPUs instead of 
             # FSDPStrategy(accelerator="gpu",
             #                        parallel_devices= 1,
             #                        cluster_environment=SLURMEnvironment(),
@@ -76,6 +74,8 @@ def train(config={
             fast_dev_run=False,
             precision=p
     )
+    # model=torch.compile(model,mode="reduce-overhead",fullgraph=True)
+
     trainer.fit(model,dataModule)
 
 
@@ -85,14 +85,14 @@ def wandbtrain(config=None,dir=None,devices=None,accelerator=None,Dataset=None):
     if config is not None:
         config=config.__dict__
         dir=config.get("dir",dir)
-        logtool= pytorch_lightning.loggers.WandbLogger( project="TestDeploy",entity="st7ma784", save_dir=dir)
+        logtool= pytorch_lightning.loggers.WandbLogger( project="TestDeploy",entity="st7ma784", save_dir=os.getenv("global_scratch",dir),name="TestDeploy")
         print(config)
 
     else:
         #We've got no config, so we'll just use the default, and hopefully a trainAgent has been passed
         print("Would recommend changing projectname according to config flags if major version swithching happens")
         run=wandb.init(project="TestDeploy",entity="st7ma784",name="TestDeploy",config=config)
-        logtool= pytorch_lightning.loggers.WandbLogger( project="TestDeploy",entity="st7ma784",experiment=run, save_dir=dir)
+        logtool= pytorch_lightning.loggers.WandbLogger( project="TestDeploy",entity="st7ma784",experiment=run, save_dir=os.getenv("global_scratch",dir))
         config=run.config.as_dict()
 
     train(config,dir,devices,accelerator,Dataset,logtool)
@@ -250,22 +250,23 @@ class baseparser(HyperOptArgumentParser):
     def __init__(self,*args,strategy="random_search",**kwargs):
 
         super().__init__( *args,strategy=strategy, add_help=False) # or random search
-        self.add_argument("--dir",default=".",type=str,)
+        self.add_argument("--dir",default="/data/data",type=str,)
         self.opt_list("--learning_rate", default=0.00001, type=float, options=[2e-4,1e-4,5e-5,1e-5,4e-6], tunable=True)
         self.opt_list("--embed_dim", default=64, type=int, options=[64,256,128,512,1024], tunable=True)
         
-        self.opt_list("--HPC", default=False, type=bool, tunable=False)
+        self.opt_list("--HPC", default=os.getenv("HPC",False), type=bool, tunable=False)
         self.opt_list("--batch_size", default=6, type=int,options=[4,8,16,32,64],tunable=True)
         self.opt_list("--MINIOHost", type=str, default="10.48.163.59", tunable=False)
         self.opt_list("--MINIOPort", type=int, default=9000, tunable=False)
         self.opt_list("--MINIOAccesskey", type=str, default="minioadmin", tunable=False)
         self.opt_list("--MINIOSecret", type=str, default="minioadmin", tunable=False)
         self.opt_list("--bucket_name", type=str, default="convmap", tunable=False)
-        self.opt_list("--time_step", type=int, default=1,options=[1], tunable=False)#currently not implemented in model
+        self.opt_list("--preProcess", type=bool, default=False, tunable=False)
+        self.opt_list("--time_step", type=int, default=1,options=[1,2,3,4,5,6,7], tunable=False)#currently not implemented in model
         self.opt_list("--grid_size", type=int, default=300,options=[100,300,500,1000], tunable=True)
-        self.opt_list("--data_dir", type=str, default="$global_scratch/convmap_data", tunable=False)
+        self.opt_list("--data_dir", type=str, default=os.path.join(os.getenv("global_scratch","/data"),"convmap_data"), tunable=False)
         self.opt_list("--method", type=str, default="grid",options=["flat","grid"], tunable=True)
-        self.opt_list("--WindowsMinutes", type=int, default=120,options=[10,20,30,60,90,120,240], tunable=True) #The number of minutes each snapshot represents
+        self.opt_list("--WindowsMinutes", type=int, default=40,options=[10,20,30,60,90,120,240], tunable=True) #The number of minutes each snapshot represents
         self.opt_list("--cache_first", type=bool, default=True, tunable=False)
         self.opt_list("--mlp_ratio", type=int, default=2, options=[2,3,4,8], tunable=True)
         #INSERT YOUR OWN PARAMETERS HERE
@@ -375,7 +376,7 @@ if __name__== "__main__":
         #debug mode - We want to just run in debug mode...
         #pick random config and have at it!
 
-        trial=hyperparams.generate_trials(1)[0]
+        trial=hyperparams.generate_trials()[0]
         #We'll grab a random trial, BUT have to launch it with KWARGS, so that DDP works.
         #result = call('{} {} --num_trials=0 {}'.format("python",os.path.realpath(sys.argv[0]),__get_hopt_params(trial)), shell=True)
 

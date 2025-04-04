@@ -41,7 +41,7 @@ class EarthAttention3D(nn.Module):
 
         self.type_of_windows = (input_resolution[0] // window_size[0]) * (input_resolution[1] // window_size[1])
 
-        self.earth_position_bias_table = torch.zeros((window_size[0] ** 2) * (window_size[1] ** 2) * (window_size[2] * 2 - 1),
+        earth_position_bias_table = torch.zeros((window_size[0] ** 2) * (window_size[1] ** 2) * (window_size[2] * 2 - 1),
                         self.type_of_windows, num_heads)
       # Wpl**2 * Wlat**2 * Wlon*2-1, Npl//Wpl * Nlat//Wlat, nH
 
@@ -52,6 +52,8 @@ class EarthAttention3D(nn.Module):
             self.register_buffer("attn_mask", attn_mask)
             self.attn_mask=attn_mask
             self.forward_WMask=self.forward_mask
+            self.nLon = self.attn_mask.shape[0]
+
         self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
         self.attn_drop = nn.Dropout(attn_drop)
         self.proj = nn.Linear(dim, dim)
@@ -64,26 +66,32 @@ class EarthAttention3D(nn.Module):
 
         # Uniformly fill tensor with values from [l, u], then translate to
         # [2l-1, 2u-1].
-        self.earth_position_bias_table.uniform_(2 * l - 1, 2 * u - 1)
+        earth_position_bias_table.uniform_(2 * l - 1, 2 * u - 1)
 
         # Use inverse cdf transform for normal distribution to get truncated
         # standard normal
-        self.earth_position_bias_table.erfinv_()
+        earth_position_bias_table.erfinv_()
 
         # Transform to proper mean, std
-        self.earth_position_bias_table.mul_(std * math.sqrt(2.))
-        self.earth_position_bias_table.add_(mean)
+        earth_position_bias_table.mul_(std * math.sqrt(2.))
+        earth_position_bias_table.add_(mean)
 
         # Clamp to ensure it's in the proper range
-        self.earth_position_bias_table.clamp_(min=a, max=b)
+        earth_position_bias_table.clamp_(min=a, max=b)
         self.softmax = nn.Softmax(dim=-1)
 
-        self.earth_position_bias_table= nn.Parameter(self.earth_position_bias_table, requires_grad=True)
+        earth_position_bias = earth_position_bias_table[earth_position_index.view(-1)].view(
+            self.window_size[0] * self.window_size[1] * self.window_size[2],
+            self.window_size[0] * self.window_size[1] * self.window_size[2],
+            self.type_of_windows, -1
+        )  # Wpl*Wlat*Wlon, Wpl*Wlat*Wlon, num_pl*num_lat, nH
+        self.earth_position_bias = earth_position_bias.permute(3, 2, 0, 1).contiguous().unsqueeze(0)
+        self.earth_position_bias= nn.Parameter(self.earth_position_bias, requires_grad=True)
+
     def forward_null(self, x: torch.Tensor, B_, nW_, N):
         return x
     def forward_mask(self, x: torch.Tensor, B_, nW_, N):
-        nLon = self.attn_mask.shape[0]
-        x = x.view(B_ // nLon, nLon, self.num_heads, nW_, N, N) + self.attn_mask.unsqueeze(1).unsqueeze(0)
+        x = x.view(-1, self.nLon, self.num_heads, nW_, N, N) + self.attn_mask.unsqueeze(1).unsqueeze(0)
         x = x.view(-1, self.num_heads, nW_, N, N)
         return x
     def forward(self, x: torch.Tensor, mask=None):
@@ -101,20 +109,18 @@ class EarthAttention3D(nn.Module):
         q = q * self.scale
         attn = (q @ k.transpose(-2, -1))
 
-        earth_position_bias = self.earth_position_bias_table[self.earth_position_index.view(-1)].view(
-            self.window_size[0] * self.window_size[1] * self.window_size[2],
-            self.window_size[0] * self.window_size[1] * self.window_size[2],
-            self.type_of_windows, -1
-        )  # Wpl*Wlat*Wlon, Wpl*Wlat*Wlon, num_pl*num_lat, nH
-        earth_position_bias = earth_position_bias.permute(3, 2, 0, 1).contiguous()  # nH, num_pl*num_lat, Wpl*Wlat*Wlon, Wpl*Wlat*Wlon
-        attn = attn + earth_position_bias.unsqueeze(0)
+          # nH, num_pl*num_lat, Wpl*Wlat*Wlon, Wpl*Wlat*Wlon
+        attn = attn + self.earth_position_bias
         attn=self.forward_WMask(attn,B_, nW_, N)
         attn = self.softmax(attn)
         attn = self.attn_drop(attn)
-        x = (attn @ v).permute(0, 2, 3, 1, 4).reshape(B_, nW_, N, C)
-        x = self.proj(x)
-        x = self.proj_drop(x)
-        return x
+        attn = (attn @ v).permute(0, 2, 3, 1, 4)
+        # print("x shape after attn: ", x.shape)
+        attn=attn.flatten(-2,-1)
+        # print("x shape after reshape: ", x.shape)
+        attn = self.proj(attn)
+        attn = self.proj_drop(attn)
+        return attn
 
 
 class DropPath(nn.Module):
@@ -133,7 +139,7 @@ class DropPath(nn.Module):
     def null_forward(self, x):
         return x
     def forward(self, x):
-        rand_tensor=x.new_empty(x.shape[0],*[[1] * (x.ndim - 1)]).bernoulli_(1 - self.drop_prob) * self.scale_factor
+        rand_tensor=x.new_empty(x.shape[0],*([1] * (x.ndim - 1))).bernoulli_(1 - self.drop_prob) * self.scale_factor
         return x * rand_tensor
     def extra_repr(self):
         return f'drop_prob={round(self.drop_prob,3):0.3f}'
@@ -280,6 +286,7 @@ class Pangu(pl.LightningModule):
             embed_dim=embed_dim
         )
         reduced_grid=(1, self.grid_size//4,self.grid_size//4)
+        self.reduced_grid= (self.grid_size//4,self.grid_size//4)
         further_reduced_grid=(1, self.grid_size//6,self.grid_size//6)
         self.layer1 =  nn.Sequential(*[
             EarthSpecificBlock(dim=embed_dim, input_resolution=reduced_grid, num_heads=num_heads[0], window_size=window_size,
@@ -291,7 +298,10 @@ class Pangu(pl.LightningModule):
             for i in range(2) #default 2
         ])
 
-        
+        def save_skip(module, input, output):
+            self.skip = output
+
+        self.skiphook = self.layer1.register_forward_hook(save_skip)
         
         self.downsample = DownSample(in_dim=embed_dim, input_resolution=reduced_grid, output_resolution=further_reduced_grid)
         #note that this changes the embed dim too from 512 to 1024? 
@@ -338,16 +348,13 @@ class Pangu(pl.LightningModule):
             surface_mask (torch.Tensor): 2D n_lat=721, n_lon=1440, chans=3.
             upper_air (torch.Tensor): 3D n_pl=13, n_lat=721, n_lon=1440, chans=5.
         """
-        
         x = self.layer1(x)
-        skip = x  # I wonder whether this should be a hook? 
         x = self.downsample(x)
         x = self.layer2(x)
         x = self.layer3(x)
         x = self.upsample(x)
         x = self.layer4(x)
-
-        return torch.concat([x, skip], dim=-1)
+        return torch.concat([x, self.skip], dim=-1)
 
     
     def training_step(self, batch, batch_idx):
@@ -357,7 +364,7 @@ class Pangu(pl.LightningModule):
         x = x.flatten(2,3).transpose(1, 2)
         for t in range(self.time_steps):
             x = self(x)
-        output = output.transpose(1, 2).unflatten(2,(75, 75))
+        x = x.transpose(1, 2).unflatten(2,self.reduced_grid)
 
         y_hat = self.patchrecovery2d(x)
         #could consider norming both of these given stacked gaussian pipelines
@@ -368,11 +375,17 @@ class Pangu(pl.LightningModule):
 
     def validation_step(self, batch, batch_idx):
         x, y = batch
-        y_hat = self(x)
+        x = self.patchembed2d(x)
+        x = x.flatten(2,3).transpose(1, 2)
+        for t in range(self.time_steps):
+            x = self(x)
+        x = x.transpose(1, 2).unflatten(2,self.reduced_grid)
+
+        y_hat = self.patchrecovery2d(x)
         loss = self.criterion(y_hat, y)
         if batch_idx % 100 == 0:
             self.plot_and_log_data(x, y, y_hat, batch_idx)
-        # self.log('val_loss', loss, on_step=True, on_epoch=True,prog_bar=True)
+        self.log('val_loss', loss, on_step=True, on_epoch=True,prog_bar=True)
         return loss
 
     def plot_and_log_data(self, x, y, y_hat, batch_idx):
@@ -399,7 +412,7 @@ class Pangu(pl.LightningModule):
         x, y = batch
         y_hat = self(x)
         loss = F.mse_loss(y_hat, y)
-        self.log('test_loss', loss)
+        # self.log('test_loss', loss)
         return loss
 
     def configure_optimizers(self):
