@@ -155,37 +155,70 @@ class SuperDARNDataset(IterableDataset):
         
     def process_conv_to_grid(self, data):
         #use the mlat, mlon to gaussian splat onto a x,y grid and stack
-        data_tensor = torch.zeros(5, self.grid_size, self.grid_size)
+        # data_tensor = torch.zeros(5, self.grid_size, self.grid_size)
         #we're going to sample the data onto a 300x300 grid
         #we're going to use a gaussian kernel to splat the data onto the grid
         #step1: create a meshgrid
-        x = np.linspace(self.location["min_mlon"], self.location["max_mlon"], self.grid_size)
-        y = np.linspace(self.location["min_mlat"], self.location["max_mlat"], self.grid_size)
-        X, Y = np.meshgrid(x, y)
+        # x = np.linspace(self.location["min_mlon"], self.location["max_mlon"], self.grid_size)
+        # y = np.linspace(self.location["min_mlat"], self.location["max_mlat"], self.grid_size)
+        # X, Y = np.meshgrid(x, y)
         #step 2 : create a gaussian kernel
 
         #step 3: splat the data onto the grid
-        for record in data:
-            if "vector.mlat" not in record:
-                # print("vector.mlat not found in record")
-                continue
-            else:
-                gj=np.array([gaussian(X, Y, record["vector.mlon"][j], record["vector.mlat"][j], 1, 1) for j in range(0, len(record["vector.mlat"]))])
-                data_tensor[0] += (np.array(record["vector.vel.median"]).reshape(-1,1,1)*gj).sum(axis=0).reshape(self.grid_size, self.grid_size)
-                data_tensor[1] += (np.array(record["vector.vel.sd"]).reshape(-1,1,1)*gj).sum(axis=0).reshape(self.grid_size, self.grid_size)
-                data_tensor[2] += (np.array(record["vector.kvect"]).reshape(-1,1,1)*gj).sum(axis=0).reshape(self.grid_size, self.grid_size)
-                data_tensor[3] += (np.array(record["vector.stid"]).reshape(-1,1,1)*gj).sum(axis=0).reshape(self.grid_size, self.grid_size)
-                data_tensor[4] += (np.array(record["vector.channel"]).reshape(-1,1,1)*gj).sum(axis=0).reshape(self.grid_size, self.grid_size)
+        #make a tensor of mlat, mlon
+        print("Data Length: ", len(data))
+        Coords=[[record["vector.mlon"],record["vector.mlat"], record["vector.vel.median"], record["vector.vel.sd"], record["vector.kvect"], record["vector.stid"], record["vector.channel"]               
+                 ] for record in data if "vector.mlat" in record]
 
-                # for j in range(0, len(record["vector.mlat"])):
-                #     g=gaussian(X, Y, record["vector.mlon"][j], record["vector.mlat"][j], 1, 1)
-                #     data_tensor[0] += record["vector.vel.median"][j]*g
-                #     data_tensor[1] += record["vector.vel.sd"][j]*g
-                #     data_tensor[2] += record["vector.kvect"][j]*g
-                #     data_tensor[3] += record["vector.stid"][j]*g
-                #     data_tensor[4] += record["vector.channel"][j]*g
-                #check its the same as if we had used the batch_gaussian 
-                
+        #convert to tensor
+        Coords=torch.tensor(Coords)
+        x= Coords[:,0]
+        y= Coords[:,1]
+        Data=Coords[:,2:7].permute(1,0).unsqueeze(1).unsqueeze(1)
+        x_tensor=torch.zeros(self.grid_size,Coords.shape[0])
+        x_tensor=x_tensor+torch.linspace(self.location["min_mlon"], self.location["max_mlon"], self.grid_size).reshape(-1,1)
+        x=x.reshape(1,-1)
+
+        print("X Tensor Shape: ", x_tensor.shape)
+        #both shapes are (grid_size, Coords.shape[0])
+        x_diff=(x_tensor-x).pow(2) 
+
+        y_tensor=torch.zeros(self.grid_size,Coords.shape[0])
+        y_tensor=y_tensor+torch.linspace(self.location["min_mlat"], self.location["max_mlat"], self.grid_size).reshape(-1,1)
+        y=y.reshape(1,-1)
+        y_diff=(y_tensor-y).pow(2)
+        x_diff=x_diff.reshape(self.grid_size,1,Coords.shape[0])
+        y_diff=y_diff.reshape(1,self.grid_size,Coords.shape[0])
+        dif=x_diff+y_diff
+
+        dif=torch.exp(-dif/(2*1**2)).unsqueeze(0)
+        #torch.exp(-((x-x0)**2/(2*sigma_x**2) + (y-y0)**2/(2*sigma_y**2)))
+
+        #shape is 1, G,G,B, need to combine with the data of shape 5,1,1,B to get 5,G,G
+        data_tensor=Data*dif 
+        data_tensor=torch.sum(data_tensor, dim=-1)
+
+        # for record in data:
+        #     if "vector.mlat" not in record:
+        #         # print("vector.mlat not found in record")
+        #         continue
+        #     else:
+        #         gj=np.array([gaussian(X, Y, record["vector.mlon"][j], record["vector.mlat"][j], 1, 1) for j in range(0, len(record["vector.mlat"]))])
+        #         data_tensor[0] += (np.array(record["vector.vel.median"]).reshape(-1,1,1)*gj).sum(axis=0).reshape(self.grid_size, self.grid_size)
+        #         data_tensor[1] += (np.array(record["vector.vel.sd"]).reshape(-1,1,1)*gj).sum(axis=0).reshape(self.grid_size, self.grid_size)
+        #         data_tensor[2] += (np.array(record["vector.kvect"]).reshape(-1,1,1)*gj).sum(axis=0).reshape(self.grid_size, self.grid_size)
+        #         data_tensor[3] += (np.array(record["vector.stid"]).reshape(-1,1,1)*gj).sum(axis=0).reshape(self.grid_size, self.grid_size)
+        #         data_tensor[4] += (np.array(record["vector.channel"]).reshape(-1,1,1)*gj).sum(axis=0).reshape(self.grid_size, self.grid_size)
+
+        #         # for j in range(0, len(record["vector.mlat"])):
+        #         #     g=gaussian(X, Y, record["vector.mlon"][j], record["vector.mlat"][j], 1, 1)
+        #         #     data_tensor[0] += record["vector.vel.median"][j]*g
+        #         #     data_tensor[1] += record["vector.vel.sd"][j]*g
+        #         #     data_tensor[2] += record["vector.kvect"][j]*g
+        #         #     data_tensor[3] += record["vector.stid"][j]*g
+        #         #     data_tensor[4] += record["vector.channel"][j]*g
+        #         #check its the same as if we had used the batch_gaussian 
+        print("Data Tensor Shape: ", data_tensor.shape)
         return data_tensor
 
     def process_data_fitacf(self, data1):
@@ -352,27 +385,26 @@ class DatasetFromMinioBucket(LightningDataModule):
     def prepare_data(self):
         # Download data from Minio bucket
 
-        # print("in prepare_data", self.cache_to_disk, self.HPC)
+        print("in prepare_data", self.cache_to_disk, self.HPC)
 
         if self.cache_to_disk==True and self.HPC==False: 
             #if we are on HPC we dont want to pull from MINIO
             #download the data from the minio bucket to the path specified in data_dir
-            if not os.path.exists(self.data_dir):
-                os.makedirs(self.data_dir)
-            file_count=len([files for root, dirs, files in os.walk(self.data_dir)])
-            # print("File Count: ", file_count)
-            MC= Minio(self.minioClient.get("host", "localhost") + ":" 
-                                                + str(self.minioClient.get("port", 9000)),
-                        access_key=self.minioClient.get("access_key", "minioadmin"),
-                        secret_key=self.minioClient.get("secret_key", "minioadmin"),
-                        secure=False)
+            print("Downloading data from Minio bucket to disk", self.data_dir)
+            os.makedirs(self.data_dir, exist_ok=True)
+            # file_count=len([files for root, dirs, files in os.walk(self.data_dir)])
+            # print("File Count: ")
+            # MC= Minio(self.minioClient.get("host", "localhost") + ":" 
+            #                                     + str(self.minioClient.get("port", 9000)),
+            #             access_key=self.minioClient.get("access_key", "minioadmin"),
+            #             secret_key=self.minioClient.get("secret_key", "minioadmin"),
+            #             secure=False)
             # print("Minio Client: ", MC)
             # print(len(list(MC.list_objects(self.bucket_name, recursive=True))))
-
-            if  file_count <= 0.9 * len(list(MC.list_objects(self.bucket_name, recursive=True))) :
-                # This is a down and dirty way to check the folders roughly the right size without interrogating fs structure
-                from MinioToDisk import download_minio_bucket_to_folder
-                download_minio_bucket_to_folder(self.minioClient, self.bucket_name, self.data_dir)
+            # if  file_count <= 0.9 * len(list(MC.list_objects(self.bucket_name, recursive=True))) :
+            # This is a down and dirty way to check the folders roughly the right size without interrogating fs structure
+            from MinioToDisk import download_minio_bucket_to_folder
+            download_minio_bucket_to_folder(self.minioClient, self.bucket_name, self.data_dir)
             #check if list the directory is the same length as the minio buckets file list 
             #if not, download the missing files using the method in MinioToDisk
         pass

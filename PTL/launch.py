@@ -26,6 +26,8 @@ def train(config={
     config.update({"minioClient": minioClient})
     model=Pangu(**config)
     dataModule=DatasetFromMinioBucket(**config)
+
+    print("building model")
     if devices is None:
         devices=config.get("devices","auto")
     if accelerator is None:
@@ -51,7 +53,7 @@ def train(config={
     trainer=pytorch_lightning.Trainer(
             devices= 1,
             num_nodes= 1,
-            accelerator="gpu",
+            accelerator= accelerator,
             max_epochs=200,
             #profiler="advanced",
             #plugins=[SLURMEnvironment()],
@@ -270,8 +272,8 @@ class baseparser(HyperOptArgumentParser):
         self.opt_list("--cache_first", type=bool, default=True, tunable=False)
         self.opt_list("--mlp_ratio", type=int, default=2, options=[2,3,4,8], tunable=True)
         #INSERT YOUR OWN PARAMETERS HERE
-        self.opt_list("--precision", default=16, options=[16], tunable=False)
-        self.opt_list("--accelerator", default='gpu', type=str, options=['gpu'], tunable=False)
+        self.opt_list("--precision", default=16, options=[32], tunable=False)
+        self.opt_list("--accelerator", default='auto', type=str, options=['gpu'], tunable=False)
         self.opt_list("--num_trials", default=0, type=int, tunable=False)
         #self.opt_range('--neurons', default=50, type=int, tunable=True, low=100, high=800, nb_samples=8, log_base=None)
         #This is important when passing arguments as **config in launcher

@@ -43,7 +43,10 @@ def download_minio_bucket_to_folder(minio_config, bucket_name, target_folder):
     try:
         # print("Starting download...")
         with ThreadPoolExecutor(max_workers=8) as executor:  # Adjust max_workers as needed
-            executor.map(download_object, minio_client.list_objects(bucket_name, recursive=True))
+            objects = list(minio_client.list_objects(bucket_name, recursive=True))
+            with tqdm(total=len(objects), desc="Downloading files", unit="file") as pbar:
+                for _ in executor.map(download_object, objects):
+                    pbar.update(1)
     except S3Error as e:
         print(f"Error occurred: {e}")
 
@@ -51,6 +54,7 @@ if __name__ == "__main__":
     # Example configuration
     import argparse
     from concurrent.futures import ThreadPoolExecutor
+from tqdm import tqdm
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", type=str, default="localhost", help="Minio server host")
     parser.add_argument("--port", type=int, default=9000, help="Minio server port")
