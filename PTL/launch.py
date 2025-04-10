@@ -271,6 +271,7 @@ class baseparser(HyperOptArgumentParser):
         self.opt_list("--WindowsMinutes", type=int, default=40,options=[10,20,30,60,90,120,240], tunable=True) #The number of minutes each snapshot represents
         self.opt_list("--cache_first", type=bool, default=True, tunable=False)
         self.opt_list("--mlp_ratio", type=int, default=2, options=[2,3,4,8], tunable=True)
+        self.opt_list("--noise_factor", type=float, default=0.0, options=[0.0,0.01,0.05,0.1,0.2,0.3], tunable=True)
         #INSERT YOUR OWN PARAMETERS HERE
         self.opt_list("--precision", default=16, options=[32], tunable=False)
         self.opt_list("--accelerator", default='auto', type=str, options=['gpu'], tunable=False)

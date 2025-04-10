@@ -272,6 +272,7 @@ class Pangu(pl.LightningModule):
         self.L1Loss = torch.nn.L1Loss()
         self.grid_size=kwargs.get("grid_size",300)
         self.mlp_ratio=kwargs.get("mlp_ratio",4)
+        self.noise_factor=kwargs.get("noise_factor",0.1)
         # In addition, three constant masks(the topography mask, land-sea mask and soil type mask)
         self.patchembed2d = PatchEmbed2D(
             img_size=(self.grid_size, self.grid_size),
@@ -363,7 +364,9 @@ class Pangu(pl.LightningModule):
         x = self.patchembed2d(x)
         x = x.flatten(2,3).transpose(1, 2)
         for t in range(self.time_steps):
+            x=x+torch.randn_like(x)*self.noise_factor
             x = self(x)
+            x=x-torch.randn_like(x)*self.noise_factor
         x = x.transpose(1, 2).unflatten(2,self.reduced_grid)
 
         y_hat = self.patchrecovery2d(x)
