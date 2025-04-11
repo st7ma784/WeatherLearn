@@ -177,7 +177,8 @@ class SuperDARNDataset(IterableDataset):
                  np.array(record["vector.channel"])], axis=0)
                  for record in data if "vector.mlat" in record]
         #convert each to numpy array then convert to tensor
-
+        if len(Coords) == 0:
+            return None
         Coords=np.concatenate(Coords, axis=1)
         #convert to tensor
         Coords=torch.tensor(Coords, dtype=torch.float32)
@@ -466,7 +467,8 @@ def save_dataset_to_disk(DataLoader, path):
     for idx,i in enumerate(tqdm(DataLoader)):
         dataA,dataB = i
         #add to the tensor
-
+        if dataA is None or dataB is None:
+            continue
         if tensorA.shape[0] == 0:
             tensorA = dataA
             tensorB = dataB
