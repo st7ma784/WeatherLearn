@@ -178,7 +178,7 @@ class SuperDARNDataset(IterableDataset):
                  for record in data if "vector.mlat" in record]
         #convert each to numpy array then convert to tensor
 
-        Coords=np.concatenate(Coords, axis=1)f
+        Coords=np.concatenate(Coords, axis=1)
         #convert to tensor
         Coords=torch.tensor(Coords, dtype=torch.float32)
         x= Coords[0]
