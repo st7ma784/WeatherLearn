@@ -54,7 +54,7 @@ if __name__ == "__main__":
     # Example configuration
     import argparse
     from concurrent.futures import ThreadPoolExecutor
-from tqdm import tqdm
+    from tqdm import tqdm
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", type=str, default="localhost", help="Minio server host")
     parser.add_argument("--port", type=int, default=9000, help="Minio server port")
