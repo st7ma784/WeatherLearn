@@ -9,7 +9,7 @@ import datetime
 from minio import Minio
 import os
 import random
-
+from tqdm import tqdm
 
 def gaussian(x, y, x0, y0, sigma_x, sigma_y):
     return np.exp(-((x-x0)**2/(2*sigma_x**2) + (y-y0)**2/(2*sigma_y**2)))
@@ -463,7 +463,7 @@ def save_dataset_to_disk(DataLoader, path):
     tensorA=torch.tensor([])
     tensorB=torch.tensor([])
     tensorshape=None
-    for idx,i in enumerate(DataLoader):
+    for idx,i in enumerate(tqdm(DataLoader)):
         dataA,dataB = i
         #add to the tensor
 
