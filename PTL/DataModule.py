@@ -158,6 +158,7 @@ class SuperDARNDataset(IterableDataset):
         # data_tensor = torch.zeros(5, self.grid_size, self.grid_size)
         #we're going to sample the data onto a 300x300 grid
         #we're going to use a gaussian kernel to splat the data onto the grid
+        
         #step1: create a meshgrid
         # x = np.linspace(self.location["min_mlon"], self.location["max_mlon"], self.grid_size)
         # y = np.linspace(self.location["min_mlat"], self.location["max_mlat"], self.grid_size)
@@ -166,9 +167,9 @@ class SuperDARNDataset(IterableDataset):
 
         #step 3: splat the data onto the grid
         #make a tensor of mlat, mlon
-        print("Data Length: ", len(data))
-        Coords=[[record["vector.mlon"],record["vector.mlat"], record["vector.vel.median"], record["vector.vel.sd"], record["vector.kvect"], record["vector.stid"], record["vector.channel"]               
-                 ] for record in data if "vector.mlat" in record]
+
+        Coords=[[record["vector.mlon"],record["vector.mlat"], record["vector.vel.median"], record["vector.vel.sd"], record["vector.kvect"], record["vector.stid"], record["vector.channel"]]
+                 for record in data if "vector.mlat" in record]
 
         #convert to tensor
         Coords=torch.tensor(Coords)
@@ -179,7 +180,7 @@ class SuperDARNDataset(IterableDataset):
         x_tensor=x_tensor+torch.linspace(self.location["min_mlon"], self.location["max_mlon"], self.grid_size).reshape(-1,1)
         x=x.reshape(1,-1)
 
-        print("X Tensor Shape: ", x_tensor.shape)
+        # print("X Tensor Shape: ", x_tensor.shape)
         #both shapes are (grid_size, Coords.shape[0])
         x_diff=(x_tensor-x).pow(2) 
 
@@ -218,7 +219,7 @@ class SuperDARNDataset(IterableDataset):
         #         #     data_tensor[3] += record["vector.stid"][j]*g
         #         #     data_tensor[4] += record["vector.channel"][j]*g
         #         #check its the same as if we had used the batch_gaussian 
-        print("Data Tensor Shape: ", data_tensor.shape)
+        # print("Data Tensor Shape: ", data_tensor.shape)
         return data_tensor
 
     def process_data_fitacf(self, data1):

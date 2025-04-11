@@ -73,7 +73,7 @@ def train(config={
             # ),
             callbacks=callbacks,
             gradient_clip_val=0.25,# Not supported for manual optimization
-            fast_dev_run=False,
+            fast_dev_run=config.get("fast_dev_run", False),
             precision=p
     )
     # model=torch.compile(model,mode="reduce-overhead",fullgraph=True)
@@ -276,6 +276,7 @@ class baseparser(HyperOptArgumentParser):
         self.opt_list("--precision", default=16, options=[32], tunable=False)
         self.opt_list("--accelerator", default='auto', type=str, options=['gpu'], tunable=False)
         self.opt_list("--num_trials", default=0, type=int, tunable=False)
+        self.opt_list("--fast_dev_run", default=False, type=bool, tunable=False)
         #self.opt_range('--neurons', default=50, type=int, tunable=True, low=100, high=800, nb_samples=8, log_base=None)
         #This is important when passing arguments as **config in launcher
         self.keys_of_interest=["dir","learning_rate","batch_size","precision","grid_size","mlp_ratio","accelerator","num_trials","WindowsMinutes","embed_dim"]
