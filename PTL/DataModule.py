@@ -170,13 +170,15 @@ class SuperDARNDataset(IterableDataset):
 
         Coords=[[record["vector.mlon"],record["vector.mlat"], record["vector.vel.median"], record["vector.vel.sd"], record["vector.kvect"], record["vector.stid"], record["vector.channel"]]
                  for record in data if "vector.mlat" in record]
-
+        #convert each to numpy array then convert to tensor
+        Coords=[np.stack([np.array(record["vector.mlon"]),np.array(record["vector.mlat"]), np.array(record["vector.vel.median"]), np.array(record["vector.vel.sd"]), np.array(record["vector.kvect"]), np.array(record["vector.stid"]), np.array(record["vector.channel"])], axis=0) for record in Coords]
+        Coords=np.catenate(Coords, axis=1)
         #convert to tensor
-        Coords=torch.tensor(Coords)
-        x= Coords[:,0]
-        y= Coords[:,1]
-        Data=Coords[:,2:7].permute(1,0).unsqueeze(1).unsqueeze(1)
-        x_tensor=torch.zeros(self.grid_size,Coords.shape[0])
+        Coords=torch.tensor(Coords, dtype=torch.float32)
+        x= Coords[0]
+        y= Coords[1]
+        Data=Coords[2:7].unsqueeze(1).unsqueeze(1)
+        x_tensor=torch.zeros(self.grid_size,Coords.shape[1])
         x_tensor=x_tensor+torch.linspace(self.location["min_mlon"], self.location["max_mlon"], self.grid_size).reshape(-1,1)
         x=x.reshape(1,-1)
 
@@ -184,12 +186,12 @@ class SuperDARNDataset(IterableDataset):
         #both shapes are (grid_size, Coords.shape[0])
         x_diff=(x_tensor-x).pow(2) 
 
-        y_tensor=torch.zeros(self.grid_size,Coords.shape[0])
+        y_tensor=torch.zeros(self.grid_size,Coords.shape[1])
         y_tensor=y_tensor+torch.linspace(self.location["min_mlat"], self.location["max_mlat"], self.grid_size).reshape(-1,1)
         y=y.reshape(1,-1)
         y_diff=(y_tensor-y).pow(2)
-        x_diff=x_diff.reshape(self.grid_size,1,Coords.shape[0])
-        y_diff=y_diff.reshape(1,self.grid_size,Coords.shape[0])
+        x_diff=x_diff.reshape(self.grid_size,1,Coords.shape[1])
+        y_diff=y_diff.reshape(1,self.grid_size,Coords.shape[1])
         dif=x_diff+y_diff
 
         dif=torch.exp(-dif/(2*1**2)).unsqueeze(0)
