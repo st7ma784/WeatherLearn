@@ -168,10 +168,15 @@ class SuperDARNDataset(IterableDataset):
         #step 3: splat the data onto the grid
         #make a tensor of mlat, mlon
 
-        Coords=[[record["vector.mlon"],record["vector.mlat"], record["vector.vel.median"], record["vector.vel.sd"], record["vector.kvect"], record["vector.stid"], record["vector.channel"]]
+        Coords=[np.stack([np.array(record["vector.mlon"]),
+                 np.array(record["vector.mlat"]),
+                 np.array(record["vector.vel.median"]),
+                 np.array(record["vector.vel.sd"]),
+                 np.array(record["vector.kvect"]),
+                 np.array(record["vector.stid"]),
+                 np.array(record["vector.channel"])], axis=0)
                  for record in data if "vector.mlat" in record]
         #convert each to numpy array then convert to tensor
-        Coords=[np.stack([np.array(record["vector.mlon"]),np.array(record["vector.mlat"]), np.array(record["vector.vel.median"]), np.array(record["vector.vel.sd"]), np.array(record["vector.kvect"]), np.array(record["vector.stid"]), np.array(record["vector.channel"])], axis=0) for record in Coords]
         Coords=np.catenate(Coords, axis=1)
         #convert to tensor
         Coords=torch.tensor(Coords, dtype=torch.float32)
