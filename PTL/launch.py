@@ -252,7 +252,7 @@ class baseparser(HyperOptArgumentParser):
     def __init__(self,*args,strategy="random_search",**kwargs):
 
         super().__init__( *args,strategy=strategy, add_help=False) # or random search
-        self.add_argument("--dir",default="/data/data",type=str,)
+        self.add_argument("--dir",default=os.path.join(os.getenv("global_scratch","/data"),"data"),type=str,)
         self.opt_list("--learning_rate", default=0.00001, type=float, options=[2e-4,1e-4,5e-5,1e-5,4e-6], tunable=True)
         self.opt_list("--embed_dim", default=64, type=int, options=[64,256,128,512,1024], tunable=True)
         
