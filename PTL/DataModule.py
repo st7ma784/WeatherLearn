@@ -30,7 +30,7 @@ class SuperDARNDatasetFolder(Dataset):
         #return the data at the index
         filename= self.data[index]
         output= self.dataset.process_file(open(os.path.join(self.data_dir, filename), 'rb'))
-        if output[0] is None or output[1] is None:
+        if output is None or output[0] is None or output[1] is None:
             # print("No data found for the given time range")
             output=self.__getitem__(random.randint(0, len(self)-1))
         return output
