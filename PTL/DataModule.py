@@ -30,7 +30,7 @@ class SuperDARNDatasetFolder(Dataset):
         #return the data at the index
         filename= self.data[index]
         output= self.dataset.process_file(open(os.path.join(self.data_dir, filename), 'rb'))
-        if output is None:
+        if output[0] is None or output[1] is None:
             # print("No data found for the given time range")
             output=self.__getitem__(random.randint(0, len(self)-1))
         return output
@@ -53,7 +53,7 @@ class SuperDARNDataset(IterableDataset):
         def __iter__():
             for file in self.generator():
                 output= self.process_file(open(os.path.join(data_dir, file), 'rb'))
-                if output is None:
+                if output[0] is None or output[1] is None:
                     continue
                 yield output
         self.__iter__ = __iter__
@@ -344,8 +344,12 @@ class SuperDARNDataset(IterableDataset):
         #     return self.process_data(reader.read_map())
         # elif reader.filetype == "fitacf":
         #     return self.process_data_fitacf(reader.read_fit())
-        return self.process_data_conv(reader.read_map())
-
+        output= self.process_data_conv(reader.read_map())
+        if output[0] is None or output[1] is None:
+            # print("No data found for the given time range")
+            return None
+        else:
+            return output
     #The data loading step will find sequential timestamps in the data, and load them into memory
     def __iter__(self):
         #returns an iterator over the objects in the bucket 
