@@ -345,6 +345,9 @@ class SuperDARNDataset(IterableDataset):
         # elif reader.filetype == "fitacf":
         #     return self.process_data_fitacf(reader.read_fit())
         output= self.process_data_conv(reader.read_map())
+        if output is None:
+            # print("No data found for the given time range")
+            return None
         if output[0] is None or output[1] is None:
             # print("No data found for the given time range")
             return None
