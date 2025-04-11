@@ -416,17 +416,18 @@ class DatasetFromMinioBucket(LightningDataModule):
             download_minio_bucket_to_folder(self.minioClient, self.bucket_name, self.data_dir)
             #check if list the directory is the same length as the minio buckets file list 
             #if not, download the missing files using the method in MinioToDisk
-        pass
 
         if self.preProcess:
             #preprocess the data
             print("Preprocessing data")
             if not os.path.exists(self.data_dir):
                 os.makedirs(self.data_dir)
-            # if len(list(os.walk(self.data_dir))) == 0:
-            dataset = SuperDARNDatasetFolder(self.data_dir, self.batch_size, self.method, self.window_size, **self.kwargs)
-            Data=DataLoader(dataset, batch_size=32, shuffle=False, num_workers=8, pin_memory=False)
-            save_dataset_to_disk(Data, os.path.join(self.data_dir, "data"))
+            if len(list(os.walk(os.path.join(self.data_dir, "data")))) <= 50:
+            
+                dataset = SuperDARNDatasetFolder(self.data_dir, self.batch_size, self.method, self.window_size, **self.kwargs)
+            
+                Data=DataLoader(dataset, batch_size=32, shuffle=False, num_workers=8, pin_memory=False)
+                save_dataset_to_disk(Data, os.path.join(self.data_dir, "data"))
 
 
     def setup(self, stage=None):
@@ -520,7 +521,11 @@ class DatasetFromPresaved(Dataset):
 
     def __getitem__(self, index):
         #reconstruct to the original shape
-        return self.dataA[index], self.dataB[index]
+        dataA,dataB= self.dataA[index], self.dataB[index]
+        #convert to tensor
+        dataA = torch.tensor(dataA, dtype=torch.float32)
+        dataB = torch.tensor(dataB, dtype=torch.float32)
+        return dataA, dataB
 
 if __name__ == "__main__":
     #test the dataloader
