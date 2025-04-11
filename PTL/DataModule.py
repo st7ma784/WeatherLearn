@@ -494,7 +494,8 @@ def save_dataset_to_disk(DataLoader, path):
     if tensorA.shape[0] > 0:
         tensorA.numpy().tofile(os.path.join(path, "dataA_{}.bin".format(idx)))
         tensorB.numpy().tofile(os.path.join(path, "dataB_{}.bin".format(idx)))
-        tensorshape[0]=-1
+        tensorshape=tensorshape.copy() #because we are going to modify it
+        tensorshape[0]=tensorA.shape[0]
     #save the shape of the data
     with open(os.path.join(path, "shape.txt"), 'w') as f:
         f.write(str(tensorshape))
