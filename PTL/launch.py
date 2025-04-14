@@ -193,6 +193,8 @@ def SlurmRun(trialconfig):
     else:
 
         sub_commands.extend(['#SBATCH -p gpu-medium',
+                             '#SBATCH --mem=96G',
+                             '#SBATCH --cpus-per-task=8',
                              'export CONDADIR=/storage/hpc/46/manders3/conda4/open-ce',
                              'export NCCL_SOCKET_IFNAME=enp0s31f6',])
     sub_commands.extend([ '#SBATCH --{}={}\n'.format(cmd, value) for  (cmd, value) in slurm_commands.items()])
