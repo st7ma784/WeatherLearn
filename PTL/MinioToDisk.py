@@ -2,6 +2,8 @@ from minio import Minio
 from minio.error import S3Error
 import os
 from concurrent.futures import ThreadPoolExecutor
+from tqdm import tqdm
+
 
 def download_minio_bucket_to_folder(minio_config, bucket_name, target_folder):
     """

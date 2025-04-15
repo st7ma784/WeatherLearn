@@ -409,15 +409,15 @@ class DatasetFromMinioBucket(LightningDataModule):
             #download the data from the minio bucket to the path specified in data_dir
             print("Downloading data from Minio bucket to disk", self.data_dir)
             os.makedirs(self.data_dir, exist_ok=True)
-            # file_count=len([files for root, dirs, files in os.walk(self.data_dir)])
-            # print("File Count: ")
-            # MC= Minio(self.minioClient.get("host", "localhost") + ":" 
-            #                                     + str(self.minioClient.get("port", 9000)),
-            #             access_key=self.minioClient.get("access_key", "minioadmin"),
-            #             secret_key=self.minioClient.get("secret_key", "minioadmin"),
-            #             secure=False)
-            # print("Minio Client: ", MC)
-            # print(len(list(MC.list_objects(self.bucket_name, recursive=True))))
+            file_count=len([files for root, dirs, files in os.walk(self.data_dir)])
+            print("File Count: ")
+            MC= Minio(self.minioClient.get("host", "localhost") + ":" 
+                                                + str(self.minioClient.get("port", 9000)),
+                        access_key=self.minioClient.get("access_key", "minioadmin"),
+                        secret_key=self.minioClient.get("secret_key", "minioadmin"),
+                        secure=False)
+            print("Minio Client: ", MC)
+            print(len(list(MC.list_objects(self.bucket_name, recursive=True))))
             # if  file_count <= 0.9 * len(list(MC.list_objects(self.bucket_name, recursive=True))) :
             # This is a down and dirty way to check the folders roughly the right size without interrogating fs structure
             from MinioToDisk import download_minio_bucket_to_folder

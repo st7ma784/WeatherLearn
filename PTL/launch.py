@@ -260,7 +260,7 @@ class baseparser(HyperOptArgumentParser):
         
         self.opt_list("--HPC", default=os.getenv("HPC",False), type=bool, tunable=False)
         self.opt_list("--batch_size", default=6, type=int,options=[4,8,16,32,64],tunable=True)
-        self.opt_list("--MINIOHost", type=str, default="10.48.163.59", tunable=False)
+        self.opt_list("--MINIOHost", type=str, default="10.45.1.250", tunable=False)
         self.opt_list("--MINIOPort", type=int, default=9000, tunable=False)
         self.opt_list("--MINIOAccesskey", type=str, default="minioadmin", tunable=False)
         self.opt_list("--MINIOSecret", type=str, default="minioadmin", tunable=False)

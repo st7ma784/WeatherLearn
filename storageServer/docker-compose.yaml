@@ -25,26 +25,26 @@ services:
     <<: *minio-common
     hostname: minio1
     volumes:
-      - data1:/data
+      - /mnt/drive3:/data
 
   minio2:
     <<: *minio-common
     hostname: minio2
     volumes:
-      - data2:/data
+      - /mnt/drive2:/data
 
 
   minio3:
     <<: *minio-common
     hostname: minio3
     volumes:
-      - data3:/data
+      - /mnt/drive4:/data
 
   minio4:
     <<: *minio-common
     hostname: minio4
     volumes:
-      - data4:/data
+      - /mnt/drive1:/data
 
   nginx:
     image: nginx:1.19.2-alpine
@@ -70,31 +70,6 @@ services:
     command: --interval 30
 
 
-volumes:
-  data1:
-    driver: local
-    driver_opts:
-      type: 'none'
-      device: '/mnt/drive1'
-      o: 'bind'
-  data2:
-    driver: local
-    driver_opts:
-      type: 'none'
-      device: '/mnt/drive2'
-      o: 'bind'
-  data3:
-    driver: local
-    driver_opts:
-      type: 'none'
-      device: '/mnt/drive3'
-      o: 'bind'
-  data4:
-    driver: local
-    driver_opts:
-      type: 'none'
-      device: '/mnt/drive4'
-      o: 'bind'
 
 
 networks:
