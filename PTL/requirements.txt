@@ -1,3 +1,7 @@
 minio
 pydarnio
 test_tube
+wandb
+tqdm
+pytorch_lightning
+matplotlib
