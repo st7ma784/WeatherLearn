@@ -10,8 +10,8 @@ from minio import Minio
 import os
 import random
 from tqdm import tqdm
-#import hashlib
 import hashlib
+import time
 
 def gaussian(x, y, x0, y0, sigma_x, sigma_y):
     return np.exp(-((x-x0)**2/(2*sigma_x**2) + (y-y0)**2/(2*sigma_y**2)))
@@ -176,7 +176,7 @@ class SuperDARNDataset(IterableDataset):
 
         #step 3: splat the data onto the grid
         #make a tensor of mlat, mlon
-        start=time.time()
+        start_time=time.time()
         Coords=[np.stack([np.array(record["vector.mlon"]),
                  np.array(record["vector.mlat"]),
                  np.array(record["vector.vel.median"]),
@@ -191,8 +191,10 @@ class SuperDARNDataset(IterableDataset):
         Coords=np.concatenate(Coords, axis=1)
         #convert to tensor
         Coords=torch.tensor(Coords, dtype=torch.float32)
-        print("time to process coords: ", time.time()-start)
-        start=time.time()
+        now=time.time()
+        time_dif=now-start_time
+        # print("time to process coords: ", time_dif)
+        start_time=time.time()
         x= Coords[0]
         y= Coords[1]
         Data=Coords[2:7].unsqueeze(1).unsqueeze(1)
@@ -240,7 +242,7 @@ class SuperDARNDataset(IterableDataset):
         #         #     data_tensor[4] += record["vector.channel"][j]*g
         #         #check its the same as if we had used the batch_gaussian 
         # print("Data Tensor Shape: ", data_tensor.shape)
-        print("Time to process data: ", time.time()-start)
+        # print("Time to process data: ", time.time()-start_time)
         return data_tensor
 
     def process_data_fitacf(self, data1):
@@ -302,7 +304,7 @@ class SuperDARNDataset(IterableDataset):
         #data1 = pydarnio.read_north_grd(data1)
 
         #start timer
-        start = time.time()
+        start_time = time.time()
         mindate=datetime.datetime(2025, 1, 3, 1, 20, 0)
         maxdate=datetime.datetime(1998,1,1,1,20,0)
 
@@ -346,7 +348,7 @@ class SuperDARNDataset(IterableDataset):
             return None
 
         # end timer
-        print("Time taken to process entries: ", time.time()-start)
+        # print("Time taken to process entries: ", time.time()-start_time)
         return self.process_conv_to_tensor(data_at_time_t), self.process_conv_to_tensor(data_at_time_t_plus_step)
 
 
