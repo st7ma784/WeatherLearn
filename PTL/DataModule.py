@@ -561,7 +561,7 @@ class DatasetFromPresaved(Dataset):
         #dataA and dataB are file lists 
         self.dataA = dataA
         self.dataB = dataB #ea
-        self.shape = shape
+        self.shape = shape[-3:]
         #Each file is 344MB, so lets avoid loading the whole thing into memory
 
 
