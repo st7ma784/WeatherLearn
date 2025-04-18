@@ -10,6 +10,8 @@ from minio import Minio
 import os
 import random
 from tqdm import tqdm
+#import hashlib
+import hashlib
 
 def gaussian(x, y, x0, y0, sigma_x, sigma_y):
     return np.exp(-((x-x0)**2/(2*sigma_x**2) + (y-y0)**2/(2*sigma_y**2)))
@@ -29,7 +31,11 @@ class SuperDARNDatasetFolder(Dataset):
     def __getitem__(self, index):
         #return the data at the index
         filename= self.data[index]
-        output= self.dataset.process_file(open(os.path.join(self.data_dir, filename), 'rb'))
+        try:
+            output= self.dataset.process_file(open(os.path.join(self.data_dir, filename), 'rb'))
+        except Exception as e:
+            print("Error: ", e)
+            output=None
         if output is None or output[0] is None or output[1] is None:
             # print("No data found for the given time range")
             output=self.__getitem__(random.randint(0, len(self)-1))
@@ -47,6 +53,9 @@ class SuperDARNDataset(IterableDataset):
             import os
             for root, dirs, files in os.walk(data_dir):
                 for file in files:
+                    if file.endswith(".bin") or file.endswith(".npy") or file.endswith(".txt"):
+                        #ignore the files that are already processed
+                        continue
                     yield file
 
         self.generator = generator
@@ -167,7 +176,7 @@ class SuperDARNDataset(IterableDataset):
 
         #step 3: splat the data onto the grid
         #make a tensor of mlat, mlon
-
+        start=time.time()
         Coords=[np.stack([np.array(record["vector.mlon"]),
                  np.array(record["vector.mlat"]),
                  np.array(record["vector.vel.median"]),
@@ -182,6 +191,8 @@ class SuperDARNDataset(IterableDataset):
         Coords=np.concatenate(Coords, axis=1)
         #convert to tensor
         Coords=torch.tensor(Coords, dtype=torch.float32)
+        print("time to process coords: ", time.time()-start)
+        start=time.time()
         x= Coords[0]
         y= Coords[1]
         Data=Coords[2:7].unsqueeze(1).unsqueeze(1)
@@ -229,6 +240,7 @@ class SuperDARNDataset(IterableDataset):
         #         #     data_tensor[4] += record["vector.channel"][j]*g
         #         #check its the same as if we had used the batch_gaussian 
         # print("Data Tensor Shape: ", data_tensor.shape)
+        print("Time to process data: ", time.time()-start)
         return data_tensor
 
     def process_data_fitacf(self, data1):
@@ -288,6 +300,9 @@ class SuperDARNDataset(IterableDataset):
 
         #step 1: Load the date range from a north.grid file
         #data1 = pydarnio.read_north_grd(data1)
+
+        #start timer
+        start = time.time()
         mindate=datetime.datetime(2025, 1, 3, 1, 20, 0)
         maxdate=datetime.datetime(1998,1,1,1,20,0)
 
@@ -329,6 +344,9 @@ class SuperDARNDataset(IterableDataset):
         if len(data_at_time_t) == 0 or len(data_at_time_t_plus_step) == 0:
             # print("No data found for the given time range")
             return None
+
+        # end timer
+        print("Time taken to process entries: ", time.time()-start)
         return self.process_conv_to_tensor(data_at_time_t), self.process_conv_to_tensor(data_at_time_t_plus_step)
 
 
@@ -398,7 +416,19 @@ class DatasetFromMinioBucket(LightningDataModule):
         self.HPC = kwargs.get("HPC", False)
         self.kwargs = kwargs
         print("using bucket: ", self.bucket_name)
-
+        unique_dset_config={
+            "minioClient": minioClient,
+            "bucket_name": bucket_name,
+            "data_dir": data_dir,
+            "time_step": kwargs.get("time_step", 1),
+            "grid_size": kwargs.get("grid_size", 300),
+            "method": method,
+            "window_size": windowMinutes,
+        }
+        # Exclude non-hashable objects like minioClient from unique_dset_config
+        hashable_config = {k: (v if isinstance(v, (int, str, float, tuple)) else str(v)) for k, v in unique_dset_config.items()}
+        self.dataset_hash = hash(frozenset(hashable_config.items()))
+        print("Dataset Hash: ", self.dataset_hash)
     def prepare_data(self):
         # Download data from Minio bucket
 
@@ -428,14 +458,15 @@ class DatasetFromMinioBucket(LightningDataModule):
         if self.preProcess:
             #preprocess the data
             print("Preprocessing data")
+            self.cache_to_disk = True
             if not os.path.exists(self.data_dir):
                 os.makedirs(self.data_dir)
-            if len(list(os.walk(os.path.join(self.data_dir, "data")))) <= 50:
+            if len(list(os.walk(os.path.join(self.data_dir, "data",str(self.dataset_hash))))) <= 50:
             
                 dataset = SuperDARNDatasetFolder(self.data_dir, self.batch_size, self.method, self.window_size, **self.kwargs)
             
-                Data=DataLoader(dataset, batch_size=32, shuffle=False, num_workers=8, pin_memory=False)
-                save_dataset_to_disk(Data, os.path.join(self.data_dir, "data"))
+                Data=DataLoader(dataset, batch_size=16, shuffle=False, num_workers=os.cpu_count(), pin_memory=False)
+                save_dataset_to_disk(Data, os.path.join(self.data_dir, "data",str(self.dataset_hash)))
 
 
     def setup(self, stage=None):
@@ -445,7 +476,7 @@ class DatasetFromMinioBucket(LightningDataModule):
             #load the data from the disk
             if self.preProcess:
                 print("Loading prepared data from disk")
-                self.dataset = DatasetFromPresaved(*load_dataset_from_disk( os.path.join(self.data_dir, "data")))
+                self.dataset = DatasetFromPresaved(*load_dataset_from_disk( os.path.join(self.data_dir, "data",str(self.dataset_hash))))
             else:
                 print("Loading data from disk")
                 self.dataset = SuperDARNDatasetFolder(self.data_dir, self.batch_size, self.method, self.window_size, **self.kwargs)
@@ -462,7 +493,7 @@ class DatasetFromMinioBucket(LightningDataModule):
     
 
 
-def save_dataset_to_disk(DataLoader, path):
+def save_dataset_to_disk(DataLoader, path,):
     #save the dataset to disk
     #create a folder with the name of the dataset
     if not os.path.exists(path):
@@ -484,19 +515,23 @@ def save_dataset_to_disk(DataLoader, path):
             tensorB = torch.cat((tensorB, dataB), dim=0)
         if tensorA.shape[0] >= 200:
             #save the data to disk
-            tensorA[:200].numpy().tofile(os.path.join(path, "dataA_{}.bin".format(idx)))
-            tensorB[:200].numpy().tofile(os.path.join(path, "dataB_{}.bin".format(idx)))
+            # tensorA[:200].numpy().tofile(os.path.join(path, "dataA_{}.bin".format(idx)))
+            np.save(os.path.join(path, "dataA_{}.npy".format(idx)), tensorA[:200].numpy())
+            # tensorB[:200].numpy().tofile(os.path.join(path, "dataB_{}.bin".format(idx)))
+            np.save(os.path.join(path, "dataB_{}.npy".format(idx)), tensorB[:200].numpy())
             tensorA = tensorA[200:]
             tensorB = tensorB[200:]
             tensorshape=tensorA.shape
 
     #save the remaining data to disk
     if tensorA.shape[0] > 0:
-        tensorA.numpy().tofile(os.path.join(path, "dataA_{}.bin".format(idx)))
-        tensorB.numpy().tofile(os.path.join(path, "dataB_{}.bin".format(idx)))
-        tensorshape=tensorshape.copy() #because we are going to modify it
-        tensorshape[0]=tensorA.shape[0]
+        # tensorA.numpy().tofile(os.path.join(path, "dataA_{}.bin".format(idx)))
+        np.save(os.path.join(path, "dataA_{}.npy".format(idx)), tensorA.numpy())
+        # tensorB.numpy().tofile(os.path.join(path, "dataB_{}.bin".format(idx)))
+        np.save(os.path.join(path, "dataB_{}.npy".format(idx)), tensorB.numpy())
+        tensorshape=list([tensorA.shape[i] for i in range(len(tensorA.shape))]) #because we are going to modify it
     #save the shape of the data
+    tensorshape[0] = -1
     with open(os.path.join(path, "shape.txt"), 'w') as f:
         f.write(str(tensorshape))
 
@@ -507,31 +542,45 @@ def load_dataset_from_disk(path):
     dataB = []
     with open(os.path.join(path, "shape.txt"), 'r') as f:
         shape = eval(f.read())
+        shape[0] = -1
 
-    for root, dirs, files in os.walk(path):
+    for root, dirs, files in tqdm(os.walk(path)):
         for file in files:
             if "dataA" in file:
-                dataA.append(np.fromfile(os.path.join(root, file), dtype=np.float32).reshape(shape))
+                dataA.append(os.path.join(root, file))
             elif "dataB" in file:
-                dataB.append(np.fromfile(os.path.join(root, file), dtype=np.float32).reshape(shape))
+                dataB.append(os.path.join(root, file))
     #stack the data
-    dataA = np.concatenate(dataA, axis=0)
-    dataB = np.concatenate(dataB, axis=0)
     return dataA, dataB,shape
 
 
 class DatasetFromPresaved(Dataset):
     def __init__(self, dataA, dataB,shape):
+        #dataA and dataB are file lists 
         self.dataA = dataA
-        self.dataB = dataB
+        self.dataB = dataB #ea
         self.shape = shape
+        #Each file is 344MB, so lets avoid loading the whole thing into memory
+
 
     def __len__(self):
         return len(self.dataA)
 
     def __getitem__(self, index):
         #reconstruct to the original shape
-        dataA,dataB= self.dataA[index], self.dataB[index]
+        file_index= index//200
+        file_offset= index%200
+        #to calculate the offset, each file holds a shape size is 200,5,G,G
+        #we want to find the offset in the file to find the correct offset for the file
+        dA=np.load(self.dataA[file_index], mmap_mode='r')
+        #load the data from the file
+        dB=np.load(self.dataB[file_index], mmap_mode='r')
+        #get the corresponding data
+        dataA,dataB= dA[file_offset,:,:,:], dB[file_offset,:,:,:]
+        #dataA and dataB are of shape 5,G,G
+        #reshape the data to the original shape
+        dataA = dataA.reshape(self.shape)
+        dataB = dataB.reshape(self.shape)
         #convert to tensor
         dataA = torch.tensor(dataA, dtype=torch.float32)
         dataB = torch.tensor(dataB, dtype=torch.float32)
