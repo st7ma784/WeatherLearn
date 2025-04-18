@@ -428,8 +428,9 @@ class DatasetFromMinioBucket(LightningDataModule):
             "window_size": windowMinutes,
         }
         # Exclude non-hashable objects like minioClient from unique_dset_config
-        hashable_config = {k: (v if isinstance(v, (int, str, float, tuple)) else str(v)) for k, v in unique_dset_config.items()}
-        self.dataset_hash = hash(frozenset(hashable_config.items()))
+        hashable_config = str(unique_dset_config).encode('utf-8')
+        # Create a hash of the configuration
+        self.dataset_hash = hashlib.md5(hashable_config).hexdigest()[:8]
         print("Dataset Hash: ", self.dataset_hash)
     def prepare_data(self):
         # Download data from Minio bucket
