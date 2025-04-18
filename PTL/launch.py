@@ -272,7 +272,7 @@ class baseparser(HyperOptArgumentParser):
         self.opt_list("--time_step", type=int, default=1,options=[1,2,3,4,5,6,7], tunable=False)#currently not implemented in model
         self.opt_list("--grid_size", type=int, default=300,options=[100,300,500,1000], tunable=True)
         self.opt_list("--data_dir", type=str, default=os.path.join(os.getenv("global_scratch","/data"),"convmap_data"), tunable=False)
-        self.opt_list("--method", type=str, default="grid",options=["flat","grid"], tunable=True)
+        self.opt_list("--method", type=str, default="grid",options=["grid"], tunable=True)#add flat in...s
         self.opt_list("--WindowsMinutes", type=int, default=40,options=[10,20,30,60,90,120,240], tunable=True) #The number of minutes each snapshot represents
         self.opt_list("--cache_first", type=bool, default=True, tunable=False)
         self.opt_list("--mlp_ratio", type=int, default=2, options=[2,3,4,8], tunable=True)
