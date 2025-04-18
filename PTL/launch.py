@@ -121,45 +121,6 @@ def neptunetrain(config=None,dir=None,devices=None,accelerator=None,Dataset=None
     train(config,dir,devices,accelerator,Dataset,logtool)
 
 
-def SLURMEval(ModelPath,config):
-    job_with_version = '{}v{}'.format("EVAL", 0)
-    sub_commands =['#!/bin/bash',
-        '#SBATCH --time={}'.format( '24:00:00'),# Max run time
-        '#SBATCH --job-name={}'.format(job_with_version),
-        '#SBATCH --nodes=1',
-        '#SBATCH --ntasks-per-node=1',
-        '#SBATCH --gres=gpu:1',
-        '#SBATCH --mail-type={}'.format(','.join(['END','FAIL'])),
-        '#SBATCH --mail-user={}'.format('st7ma784@gmail.com'),]
-    comm="python"
-    slurm_commands={}
-
-    if str(os.getenv("HOSTNAME","localhost")).endswith("bede.dur.ac.uk"):
-        sub_commands.extend([
-                '#SBATCH --account MYACOCUNT',
-                'export CONDADIR=/nobackup/projects/<BEDEPROJECT>/$USER/miniconda',
-                'export NCCL_SOCKET_IFNAME=ib0'])
-        comm="python3"
-    else:
-
-        sub_commands.extend(['#SBATCH -p gpu-medium',
-                             '#SBATCH --cpus-per-task=16',
-                             '#SBATCH --mem=96G',
-                             'export CONDADIR=/storage/hpc/46/manders3/conda4/open-ce',
-                             'export NCCL_SOCKET_IFNAME=enp0s31f6',])
-    sub_commands.extend([ '#SBATCH --{}={}\n'.format(cmd, value) for  (cmd, value) in slurm_commands.items()])
-    sub_commands.extend([
-        'export SLURM_NNODES=$SLURM_JOB_NUM_NODES',
-        'export wandb=9cf7e97e2460c18a89429deed624ec1cbfb537bc',
-        'export WANDB_API_KEY=9cf7e97e2460c18a89429deed624ec1cbfb537bc',
-        'export WANDB_API_TOKEN=9cf7e97e2460c18a89429deed624ec1cbfb537bc',
-        'source /etc/profile',
-        'module add opence',
-        'conda activate $CONDADIR',# ...and activate the conda environment
-    ])
-
-
-
 
 def SlurmRun(trialconfig):
 
@@ -197,13 +158,16 @@ def SlurmRun(trialconfig):
 
         sub_commands.extend(['#SBATCH -p gpu-medium',
                              '#SBATCH --mem=96G',
-                             '#SBATCH --cpus-per-task=8',
+                             '#SBATCH --cpus-per-task=16',
                              'export CONDADIR=/storage/hpc/46/manders3/conda4/open-ce',
                              'export NCCL_SOCKET_IFNAME=enp0s31f6',])
     sub_commands.extend([ '#SBATCH --{}={}\n'.format(cmd, value) for  (cmd, value) in slurm_commands.items()])
     sub_commands.extend([
         'export SLURM_NNODES=$SLURM_JOB_NUM_NODES',
         'export wandb=9cf7e97e2460c18a89429deed624ec1cbfb537bc',
+        'export WANDB_API_KEY=9cf7e97e2460c18a89429deed624ec1cbfb537bc',
+        'export WANDB_API_TOKEN=9cf7e97e2460c18a89429deed624ec1cbfb537bc',
+
         'source /etc/profile',
         'module add opence',
         'conda activate $CONDADIR',# ...and activate the conda environment
