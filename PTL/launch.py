@@ -143,6 +143,7 @@ def SLURMEval(ModelPath,config):
     else:
 
         sub_commands.extend(['#SBATCH -p gpu-medium',
+                             '#SBATCH --cpus-per-task=16',
                              '#SBATCH --mem=96G',
                              'export CONDADIR=/storage/hpc/46/manders3/conda4/open-ce',
                              'export NCCL_SOCKET_IFNAME=enp0s31f6',])
@@ -150,6 +151,8 @@ def SLURMEval(ModelPath,config):
     sub_commands.extend([
         'export SLURM_NNODES=$SLURM_JOB_NUM_NODES',
         'export wandb=9cf7e97e2460c18a89429deed624ec1cbfb537bc',
+        'export WANDB_API_KEY=9cf7e97e2460c18a89429deed624ec1cbfb537bc',
+        'export WANDB_API_TOKEN=9cf7e97e2460c18a89429deed624ec1cbfb537bc',
         'source /etc/profile',
         'module add opence',
         'conda activate $CONDADIR',# ...and activate the conda environment
