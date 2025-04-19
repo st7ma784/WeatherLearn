@@ -166,7 +166,6 @@ def SlurmRun(trialconfig):
         'export SLURM_NNODES=$SLURM_JOB_NUM_NODES',
         'export wandb=9cf7e97e2460c18a89429deed624ec1cbfb537bc',
         'export WANDB_API_KEY=9cf7e97e2460c18a89429deed624ec1cbfb537bc',
-        'export WANDB_API_TOKEN=9cf7e97e2460c18a89429deed624ec1cbfb537bc',
 
         'source /etc/profile',
         'module add opence',

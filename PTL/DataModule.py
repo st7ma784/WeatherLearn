@@ -416,6 +416,10 @@ class DatasetFromMinioBucket(LightningDataModule):
         print("Preprocess: ", self.preProcess)
         self.cache_to_disk = kwargs.get("cache_first", False)
         self.HPC = kwargs.get("HPC", False)
+        if self.cache_to_disk=="True":
+            self.cache_to_disk = True
+        if self.HPC=="True":
+            self.HPC = True
         self.kwargs = kwargs
         print("using bucket: ", self.bucket_name)
         unique_dset_config={
@@ -464,8 +468,9 @@ class DatasetFromMinioBucket(LightningDataModule):
             self.cache_to_disk = True
             if not os.path.exists(self.data_dir):
                 os.makedirs(self.data_dir)
-            if len(list(os.walk(os.path.join(self.data_dir, "data",str(self.dataset_hash))))) <= 50:
-            
+
+            if not os.path.exists(os.path.join(self.data_dir, "data",str(self.dataset_hash))):
+                os.makedirs(os.path.join(self.data_dir, "data",str(self.dataset_hash)))            
                 dataset = SuperDARNDatasetFolder(self.data_dir, self.batch_size, self.method, self.window_size, **self.kwargs)
                 cpu_count = os.cpu_count() if os.getenv("HPC", "False") == "False" else min(os.cpu_count(), 8)# cap cpus at 8 on HPC to avoid OOM errors
                 Data=DataLoader(dataset, batch_size=16, shuffle=False, num_workers=cpu_count, pin_memory=False)
@@ -489,7 +494,7 @@ class DatasetFromMinioBucket(LightningDataModule):
     def train_dataloader(self):
         #we CAN shuffle the dataset here, because each item includes timestep t and timestep t+1
         return DataLoader(self.train_dataset, batch_size=self.batch_size, shuffle=False, num_workers=12, pin_memory=True,prefetch_factor=3)
-    def val_dataloader(self):
+    def validation_dataloader(self):
         return DataLoader(self.val_dataset, batch_size=self.batch_size, shuffle=False, num_workers=8, pin_memory=True)
     def test_dataloader(self):
         return DataLoader(self.val_dataset, batch_size=self.batch_size, shuffle=False, num_workers=4, pin_memory=True)
@@ -563,11 +568,12 @@ class DatasetFromPresaved(Dataset):
         self.dataA = dataA
         self.dataB = dataB #ea
         self.shape = shape[-3:]
+        self.len= len(dataA)*200
         #Each file is 344MB, so lets avoid loading the whole thing into memory
 
 
     def __len__(self):
-        return len(self.dataA)
+        return self.len
 
     def __getitem__(self, index):
         #reconstruct to the original shape
@@ -579,6 +585,9 @@ class DatasetFromPresaved(Dataset):
         #load the data from the file
         dB=np.load(self.dataB[file_index], mmap_mode='r')
         #get the corresponding data
+        if dA.shape[0] < file_offset or dB.shape[0] < file_offset:
+            self.len=self.len-200+dA.shape[0]
+            return self.__getitem__(random.randint(0, self.len-1))
         dataA,dataB= dA[file_offset,:,:,:], dB[file_offset,:,:,:]
         #dataA and dataB are of shape 5,G,G
         #reshape the data to the original shape
