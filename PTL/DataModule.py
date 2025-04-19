@@ -493,7 +493,7 @@ class DatasetFromMinioBucket(LightningDataModule):
 
     def train_dataloader(self):
         #we CAN shuffle the dataset here, because each item includes timestep t and timestep t+1
-        return DataLoader(self.train_dataset, batch_size=self.batch_size, shuffle=False, num_workers=12, pin_memory=True,prefetch_factor=3)
+        return DataLoader(self.train_dataset, batch_size=self.batch_size, shuffle=True, num_workers=12, pin_memory=True,prefetch_factor=3)
     def validation_dataloader(self):
         return DataLoader(self.val_dataset, batch_size=self.batch_size, shuffle=False, num_workers=8, pin_memory=True)
     def test_dataloader(self):
@@ -585,10 +585,17 @@ class DatasetFromPresaved(Dataset):
         #load the data from the file
         dB=np.load(self.dataB[file_index], mmap_mode='r')
         #get the corresponding data
-        if dA.shape[0] < file_offset or dB.shape[0] < file_offset:
+        if dA.shape[0] <= file_offset or dB.shape[0] <= file_offset:
             self.len=self.len-200+dA.shape[0]
             return self.__getitem__(random.randint(0, self.len-1))
-        dataA,dataB= dA[file_offset,:,:,:], dB[file_offset,:,:,:]
+        try:
+            dataA = dA[file_offset,:,:,:]
+            dataB = dB[file_offset,:,:,:]
+        except Exception as e:
+            print("Error: ", e)
+            #if the file is empty, skip it
+            self.len=self.len-200+dA.shape[0]
+            return self.__getitem__(random.randint(0, self.len-1))
         #dataA and dataB are of shape 5,G,G
         #reshape the data to the original shape
         dataA = dataA.reshape(self.shape)

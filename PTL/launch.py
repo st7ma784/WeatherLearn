@@ -221,27 +221,26 @@ class baseparser(HyperOptArgumentParser):
 
         super().__init__( *args,strategy=strategy, add_help=False) # or random search
         self.add_argument("--dir",default=os.path.join(os.getenv("global_scratch","/data"),"data"),type=str,)
-        self.opt_list("--learning_rate", default=0.00001, type=float, options=[2e-4,1e-4,5e-5,1e-5,4e-6], tunable=True)
-        self.opt_list("--embed_dim", default=64, type=int, options=[64,256,128,512,1024], tunable=True)
-        
+        self.opt_list("--learning_rate", default=0.001, type=float, options=[2e-3,1e-4,5e-5], tunable=True)
+        self.opt_list("--embed_dim", default=128, type=int, options=[64,256,128,512], tunable=True)
         self.opt_list("--HPC", default=os.getenv("HPC",False), type=bool, tunable=False)
-        self.opt_list("--batch_size", default=6, type=int,options=[4,8,16,32,64],tunable=True)
+        self.opt_list("--batch_size", default=4, type=int,options=[4,8,10],tunable=True)
         self.opt_list("--MINIOHost", type=str, default="10.45.1.250", tunable=False)
         self.opt_list("--MINIOPort", type=int, default=9000, tunable=False)
         self.opt_list("--MINIOAccesskey", type=str, default="minioadmin", tunable=False)
         self.opt_list("--MINIOSecret", type=str, default="minioadmin", tunable=False)
         self.opt_list("--bucket_name", type=str, default="convmap", tunable=False)
         self.opt_list("--preProcess", type=bool, default=False, tunable=False)
-        self.opt_list("--time_step", type=int, default=1,options=[1,2,3,4,5,6,7], tunable=False)#currently not implemented in model
-        self.opt_list("--grid_size", type=int, default=300,options=[100,300,500,1000], tunable=True)
+        self.opt_list("--time_step", type=int, default=1,options=[1,2,3,4], tunable=False)#currently not implemented in model
+        self.opt_list("--grid_size", type=int, default=300,options=[100,300,500], tunable=True)
         self.opt_list("--data_dir", type=str, default=os.path.join(os.getenv("global_scratch","/data"),"convmap_data"), tunable=False)
         self.opt_list("--method", type=str, default="grid",options=["grid"], tunable=True)#add flat in...s
         self.opt_list("--WindowsMinutes", type=int, default=40,options=[10,20,30,60,90,120,240], tunable=True) #The number of minutes each snapshot represents
         self.opt_list("--cache_first", type=bool, default=True, tunable=False)
-        self.opt_list("--mlp_ratio", type=int, default=2, options=[2,3,4,8], tunable=True)
+        self.opt_list("--mlp_ratio", type=int, default=2, options=[2,3,4], tunable=True)
         self.opt_list("--noise_factor", type=float, default=0.0, options=[0.0,0.01,0.05,0.1,0.2,0.3], tunable=True)
         #INSERT YOUR OWN PARAMETERS HERE
-        self.opt_list("--precision", default=16, options=[32], tunable=False)
+        self.opt_list("--precision", default=16, options=[16], tunable=False)
         self.opt_list("--accelerator", default='auto', type=str, options=['gpu'], tunable=False)
         self.opt_list("--num_trials", default=0, type=int, tunable=False)
         self.opt_list("--fast_dev_run", default=False, type=bool, tunable=False)
