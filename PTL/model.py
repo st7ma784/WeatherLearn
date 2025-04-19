@@ -364,9 +364,9 @@ class Pangu(pl.LightningModule):
         x = self.patchembed2d(x)
         x = x.flatten(2,3).transpose(1, 2)
         for t in range(self.time_steps):
-            x=x+torch.randn_like(x)*self.noise_factor
+            x=x+(torch.randn_like(x)*self.noise_factor)
             x = self(x)
-            x=x-torch.randn_like(x)*self.noise_factor
+            x=x-(torch.randn_like(x)*self.noise_factor)
         x = x.transpose(1, 2).unflatten(2,self.reduced_grid)
 
         y_hat = self.patchrecovery2d(x)
