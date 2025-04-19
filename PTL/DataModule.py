@@ -467,8 +467,8 @@ class DatasetFromMinioBucket(LightningDataModule):
             if len(list(os.walk(os.path.join(self.data_dir, "data",str(self.dataset_hash))))) <= 50:
             
                 dataset = SuperDARNDatasetFolder(self.data_dir, self.batch_size, self.method, self.window_size, **self.kwargs)
-            
-                Data=DataLoader(dataset, batch_size=16, shuffle=False, num_workers=os.cpu_count(), pin_memory=False)
+                cpu_count = os.cpu_count() if os.getenv("HPC", "False") == "False" else min(os.cpu_count(), 8)# cap cpus at 8 on HPC to avoid OOM errors
+                Data=DataLoader(dataset, batch_size=16, shuffle=False, num_workers=cpu_count, pin_memory=False)
                 save_dataset_to_disk(Data, os.path.join(self.data_dir, "data",str(self.dataset_hash)))
 
 
