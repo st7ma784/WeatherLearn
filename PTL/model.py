@@ -268,7 +268,7 @@ class Pangu(pl.LightningModule):
         self.time_steps= kwargs.get("time_step", 1)
         # print("Steves note: window size is ", window_size)
         drop_path = np.linspace(0, 0.2, 8).tolist()
-        self.criterion= torch.nn.MSELoss(reduction='mean')
+        self.criterion= torch.nn.MSELoss(reduction='sum')
         self.L1Loss = torch.nn.L1Loss()
         self.grid_size=kwargs.get("grid_size",300)
         self.mlp_ratio=kwargs.get("mlp_ratio",4)
@@ -371,9 +371,9 @@ class Pangu(pl.LightningModule):
 
         y_hat = self.patchrecovery2d(x)
         #could consider norming both of these given stacked gaussian pipelines
-
+        # y_hat = y_hat / torch.norm(y_hat, dim=(-2,-1), keepdim=True)
         loss = self.criterion(y_hat, y)
-        self.log('train_loss', loss, on_step=True, on_epoch=True,prog_bar=True)
+        self.log('train_loss', loss, on_epoch=True,prog_bar=True)
         return loss
 
     def validation_step(self, batch, batch_idx):
@@ -388,7 +388,7 @@ class Pangu(pl.LightningModule):
         loss = self.criterion(y_hat, y)
         if batch_idx % 100 == 0:
             self.plot_and_log_data(x, y, y_hat, batch_idx)
-        self.log('val_loss', loss, on_step=True, on_epoch=True,prog_bar=True)
+        self.log('val_loss', loss, on_epoch=True,prog_bar=True)
         return loss
 
     def plot_and_log_data(self, x, y, y_hat, batch_idx):
@@ -408,17 +408,18 @@ class Pangu(pl.LightningModule):
             plt.savefig(f"results/{batch_idx}/{item}.png")
             plt.close()
         #log these plots to WandB using log_image function assumeing self.logger is WandB
-        if isinstance(self.logger, pl.loggers.wandb.WandbLogger):
-            self.logger.log_image("examples",[f"results/{batch_idx}/{item}.png" for item in range(Batch_size)])     
+        # if isinstance(self.logger, pl.loggers.wandb.WandbLogger):
+        self.logger.log_image("examples",[f"results/{batch_idx}/{item}.png" for item in range(Batch_size)])     
 
     def test_step(self, batch, batch_idx):
         x, y = batch
         y_hat = self(x)
-        loss = F.mse_loss(y_hat, y)
+        # loss = F.mse_loss(y_hat, y)
+        loss=F.cross_entropy_loss(y_hat, y)
         # self.log('test_loss', loss)
         return loss
 
     def configure_optimizers(self):
-        optimizer = torch.optim.Adam(self.parameters(), lr=self.learning_rate, weight_decay=1e-2)
+        optimizer = torch.optim.Adam(self.parameters(), lr=self.learning_rate, betas=(0.9, 0.999), eps=1e-08, weight_decay=0.05)
         return optimizer
 

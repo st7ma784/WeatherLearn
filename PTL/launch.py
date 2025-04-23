@@ -36,7 +36,7 @@ def train(config={
     filename="model-{}".format(datetime.datetime.now().strftime("%Y-%m-%d-%H-%M-%S"))
     callbacks=[
         TQDMProgressBar(),
-        EarlyStopping(monitor="train_loss", mode="min",patience=10,check_finite=True,stopping_threshold=0.001),
+        EarlyStopping(monitor="train_loss", mode="min",patience=10,check_finite=True,stopping_threshold=0.00001),
         #save best model
         pytorch_lightning.callbacks.ModelCheckpoint(
             monitor='train_loss',
@@ -221,10 +221,10 @@ class baseparser(HyperOptArgumentParser):
 
         super().__init__( *args,strategy=strategy, add_help=False) # or random search
         self.add_argument("--dir",default=os.path.join(os.getenv("global_scratch","/data"),"data"),type=str,)
-        self.opt_list("--learning_rate", default=0.001, type=float, options=[2e-3,1e-4,5e-5], tunable=True)
-        self.opt_list("--embed_dim", default=128, type=int, options=[64,256,128,512], tunable=True)
+        self.opt_list("--learning_rate", default=0.0001, type=float, options=[2e-3,1e-4,5e-5], tunable=True)
+        self.opt_list("--embed_dim", default=64, type=int, options=[64,256,128,512], tunable=True)
         self.opt_list("--HPC", default=os.getenv("HPC",False), type=bool, tunable=False)
-        self.opt_list("--batch_size", default=4, type=int,options=[4,8,10],tunable=True)
+        self.opt_list("--batch_size", default=6, type=int,options=[4,8,10],tunable=True)
         self.opt_list("--MINIOHost", type=str, default="10.45.1.250", tunable=False)
         self.opt_list("--MINIOPort", type=int, default=9000, tunable=False)
         self.opt_list("--MINIOAccesskey", type=str, default="minioadmin", tunable=False)
@@ -237,8 +237,8 @@ class baseparser(HyperOptArgumentParser):
         self.opt_list("--method", type=str, default="grid",options=["grid"], tunable=True)#add flat in...s
         self.opt_list("--WindowsMinutes", type=int, default=40,options=[10,20,30,60,90,120,240], tunable=True) #The number of minutes each snapshot represents
         self.opt_list("--cache_first", type=bool, default=True, tunable=False)
-        self.opt_list("--mlp_ratio", type=int, default=2, options=[2,3,4], tunable=True)
-        self.opt_list("--noise_factor", type=float, default=0.0, options=[0.0,0.01,0.05,0.1,0.2,0.3], tunable=True)
+        self.opt_list("--mlp_ratio", type=int, default=4, options=[2,3,4], tunable=True)
+        self.opt_list("--noise_factor", type=float, default=0.01, options=[0.0,0.01,0.05,0.1,0.2,0.3], tunable=True)
         #INSERT YOUR OWN PARAMETERS HERE
         self.opt_list("--precision", default=16, options=[16], tunable=False)
         self.opt_list("--accelerator", default='auto', type=str, options=['gpu'], tunable=False)
