@@ -243,6 +243,8 @@ class SuperDARNDataset(IterableDataset):
         #         #check its the same as if we had used the batch_gaussian 
         # print("Data Tensor Shape: ", data_tensor.shape)
         # print("Time to process data: ", time.time()-start_time)
+        #normalize the data
+        data_tensor=data_tensor/torch.norm(data_tensor, dim=[-1,-2], keepdim=True)
         return data_tensor
 
     def process_data_fitacf(self, data1):
