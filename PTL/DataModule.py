@@ -603,6 +603,9 @@ class DatasetFromPresaved(Dataset):
         #convert to tensor
         dataA = torch.tensor(dataA, dtype=torch.float32)
         dataB = torch.tensor(dataB, dtype=torch.float32)
+
+        dataA= dataA/torch.norm(dataA, dim=[-1,-2], keepdim=True)
+        dataB= dataB/torch.norm(dataB, dim=[-1,-2], keepdim=True)
         return dataA, dataB
 
 if __name__ == "__main__":

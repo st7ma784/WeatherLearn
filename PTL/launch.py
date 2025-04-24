@@ -98,7 +98,7 @@ def wandbtrain(config=None,dir=None,devices=None,accelerator=None,Dataset=None):
         config=run.config.as_dict()
 
     train(config,dir,devices,accelerator,Dataset,logtool)
-
+    wandb.finish()
 
 def neptunetrain(config=None,dir=None,devices=None,accelerator=None,Dataset=None):
     import neptune
@@ -221,10 +221,10 @@ class baseparser(HyperOptArgumentParser):
 
         super().__init__( *args,strategy=strategy, add_help=False) # or random search
         self.add_argument("--dir",default=os.path.join(os.getenv("global_scratch","/data"),"data"),type=str,)
-        self.opt_list("--learning_rate", default=0.0001, type=float, options=[2e-3,1e-4,5e-5], tunable=True)
-        self.opt_list("--embed_dim", default=64, type=int, options=[64,256,128,512], tunable=True)
+        self.opt_list("--learning_rate", default=0.00005, type=float, options=[2e-3,1e-4,5e-5], tunable=True)
+        self.opt_list("--embed_dim", default=128, type=int, options=[64,256,128,512], tunable=True)
         self.opt_list("--HPC", default=os.getenv("HPC",False), type=bool, tunable=False)
-        self.opt_list("--batch_size", default=6, type=int,options=[4,8,10],tunable=True)
+        self.opt_list("--batch_size", default=4, type=int,options=[4,8,10],tunable=True)
         self.opt_list("--MINIOHost", type=str, default="10.45.1.250", tunable=False)
         self.opt_list("--MINIOPort", type=int, default=9000, tunable=False)
         self.opt_list("--MINIOAccesskey", type=str, default="minioadmin", tunable=False)
@@ -238,7 +238,7 @@ class baseparser(HyperOptArgumentParser):
         self.opt_list("--WindowsMinutes", type=int, default=40,options=[10,20,30,60,90,120,240], tunable=True) #The number of minutes each snapshot represents
         self.opt_list("--cache_first", type=bool, default=True, tunable=False)
         self.opt_list("--mlp_ratio", type=int, default=4, options=[2,3,4], tunable=True)
-        self.opt_list("--noise_factor", type=float, default=0.01, options=[0.0,0.01,0.05,0.1,0.2,0.3], tunable=True)
+        self.opt_list("--noise_factor", type=float, default=0.1, options=[0.0,0.01,0.05,0.1,0.002,0.005], tunable=True)
         #INSERT YOUR OWN PARAMETERS HERE
         self.opt_list("--precision", default=16, options=[16], tunable=False)
         self.opt_list("--accelerator", default='auto', type=str, options=['gpu'], tunable=False)
@@ -346,15 +346,19 @@ if __name__== "__main__":
     if NumTrials==-1:
         #debug mode - We want to just run in debug mode...
         #pick random config and have at it!
+        while True:
+            trial=hyperparams.generate_trials()[0]
+            #We'll grab a random trial, BUT have to launch it with KWARGS, so that DDP works.
+            #result = call('{} {} --num_trials=0 {}'.format("python",os.path.realpath(sys.argv[0]),__get_hopt_params(trial)), shell=True)
 
-        trial=hyperparams.generate_trials()[0]
-        #We'll grab a random trial, BUT have to launch it with KWARGS, so that DDP works.
-        #result = call('{} {} --num_trials=0 {}'.format("python",os.path.realpath(sys.argv[0]),__get_hopt_params(trial)), shell=True)
-
-        print("Running trial: {}".format(trial))
-
-        wandbtrain(trial)
-
+            print("Running trial: {}".format(trial))
+            try:
+                wandbtrain(trial)
+            except Exception as e:
+                print("Error running trial: {}".format(e))
+                wandb.finish()
+                continue
+            
     elif NumTrials ==0 and not str(os.getenv("HOSTNAME","localhost")).startswith("login"): #We'll do a trial run...
         #means we've been launched from a BEDE script, so use config given in args///
         
