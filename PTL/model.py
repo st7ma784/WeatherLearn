@@ -287,6 +287,8 @@ class Pangu(pl.LightningModule):
             embed_dim=embed_dim
         )
         reduced_grid=(1, self.grid_size//4,self.grid_size//4)
+        self.incremental_step=0
+        self.skip_steps=[]
         self.reduced_grid= (self.grid_size//4,self.grid_size//4)
         further_reduced_grid=(1, self.grid_size//6,self.grid_size//6)
         self.layer1 =  nn.Sequential(*[
@@ -300,7 +302,13 @@ class Pangu(pl.LightningModule):
         ])
 
         def save_skip(module, input, output):
-            self.skip = output
+            #each time something goes throuogh this layer, add it to a list of skipped steps 
+            # print("incremental step: ", self.incremental_step)
+            # print("output shape: ", output.shape)
+            self.skip_steps.append(output)
+            
+
+            # self.skip = output
 
         self.skiphook = self.layer1.register_forward_hook(save_skip)
         
@@ -339,7 +347,7 @@ class Pangu(pl.LightningModule):
         ])
         
         # The outputs of the 2nd encoder layer and the 7th decoder layer are concatenated along the channel dimension.
-        self.patchrecovery2d = PatchRecovery2D((self.grid_size, self.grid_size), (4, 4), 2 * embed_dim, 5)
+        self.patchrecovery2d = PatchRecovery2D((self.grid_size, self.grid_size), (4, 4), (1+self.time_steps) * embed_dim, 5)
         # self.patchrecovery3d = PatchRecovery3D((5,300,300), (2, 4, 4), 2 * embed_dim, 5)
 
     def forward(self, x):#, surface_mask, upper_air):
@@ -355,33 +363,40 @@ class Pangu(pl.LightningModule):
         x = self.layer3(x)
         x = self.upsample(x)
         x = self.layer4(x)
-        return torch.concat([x, self.skip], dim=-1)
+        return x
 
     
     def training_step(self, batch, batch_idx):
         x, y = batch
-        
+        self.skip_steps=[]
+
         x = self.patchembed2d(x)
         x = x.flatten(2,3).transpose(1, 2)
         for t in range(self.time_steps):
             x=x+(torch.randn_like(x)*self.noise_factor)
             x = self(x)
             x=x-(torch.randn_like(x)*self.noise_factor)
-        x = x.transpose(1, 2).unflatten(2,self.reduced_grid)
 
-        y_hat = self.patchrecovery2d(x)
+        x=torch.concat([x, *self.skip_steps], dim=-1)
+        #pause and ensure that the skip steps are correct and printed
+        x = x.transpose(1, 2).unflatten(2,self.reduced_grid)
+        x = self.patchrecovery2d(x)
         #could consider norming both of these given stacked gaussian pipelines
         # y_hat = y_hat / torch.norm(y_hat, dim=(-2,-1), keepdim=True)
-        loss = self.criterion(y_hat, y)
+        loss = self.criterion(x, y)
         self.log('train_loss', loss, on_epoch=True,prog_bar=True)
         return loss
 
     def validation_step(self, batch, batch_idx):
+        self.skip_steps=[]
+
         x, y = batch
         x = self.patchembed2d(x)
         x = x.flatten(2,3).transpose(1, 2)
         for t in range(self.time_steps):
             x = self(x)
+        x = torch.concat([x, *self.skip_steps], dim=-1)
+        print("x shape after concat: ", x.shape)
         x = x.transpose(1, 2).unflatten(2,self.reduced_grid)
 
         y_hat = self.patchrecovery2d(x)
@@ -412,8 +427,15 @@ class Pangu(pl.LightningModule):
         self.logger.log_image("examples",[f"results/{batch_idx}/{item}.png" for item in range(Batch_size)])     
 
     def test_step(self, batch, batch_idx):
+        self.skip_steps=[]
+
         x, y = batch
-        y_hat = self(x)
+        for t in range(self.time_steps):
+            x = self(x)
+        y_hat = torch.concat([x, *self.skip_steps], dim=-1)
+        y_hat = y_hat.transpose(1, 2).unflatten(2,self.reduced_grid)
+        # y_hat = self.patchrecovery3d(y_hat)
+        y_hat = self.patchrecovery2d(y_hat)
         # loss = F.mse_loss(y_hat, y)
         loss=F.cross_entropy_loss(y_hat, y)
         # self.log('test_loss', loss)

@@ -550,9 +550,7 @@ def load_dataset_from_disk(path):
     #load the dataset from disk
     dataA = []
     dataB = []
-    with open(os.path.join(path, "shape.txt"), 'r') as f:
-        shape = eval(f.read())
-        shape[0] = -1
+    
 
     for root, dirs, files in tqdm(os.walk(path)):
         for file in files:
@@ -561,6 +559,15 @@ def load_dataset_from_disk(path):
             elif "dataB" in file:
                 dataB.append(os.path.join(root, file))
     #stack the data
+    shape=None
+    try:
+        with open(os.path.join(path, "shape.txt"), 'r') as f:
+            shape = eval(f.read())
+            shape[0] = -1
+    except Exception as e:
+        print("Error: ", e)
+        #if the shape file is not found, set the shape to None
+        shape = None
     return dataA, dataB,shape
 
 
@@ -569,7 +576,10 @@ class DatasetFromPresaved(Dataset):
         #dataA and dataB are file lists 
         self.dataA = dataA
         self.dataB = dataB #ea
-        self.shape = shape[-3:]
+        if shape is not None:
+            self.shape = shape[-3:]
+        else:
+            self.shape = None
         self.len= len(dataA)*200
         #Each file is 344MB, so lets avoid loading the whole thing into memory
 
@@ -600,6 +610,11 @@ class DatasetFromPresaved(Dataset):
             return self.__getitem__(random.randint(0, self.len-1))
         #dataA and dataB are of shape 5,G,G
         #reshape the data to the original shape
+        if self.shape is None:
+            #print da shape 
+            self.shape = list(dataA.shape)
+            self.shape[0] = -1
+            print("DataA Shape: ", dataA.shape)
         dataA = dataA.reshape(self.shape)
         dataB = dataB.reshape(self.shape)
         #convert to tensor
