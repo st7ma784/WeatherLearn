@@ -13,7 +13,6 @@ def norm_cdf(x):
     return (1. + math.erf(x / math.sqrt(2.))) / 2.
 
 
-
 class EarthAttention3D(nn.Module):
     """
     3D window attention with earth position bias.
@@ -280,12 +279,12 @@ class Pangu(pl.LightningModule):
             in_chans=5,  # add
             embed_dim=embed_dim,
         )
-        self.patchembed3d = PatchEmbed3D(
-            img_size=(5, self.grid_size, self.grid_size),
-            patch_size=(2, 4, 4),
-            in_chans=5,
-            embed_dim=embed_dim
-        )
+        # self.patchembed3d = PatchEmbed3D(
+        #     img_size=(5, self.grid_size, self.grid_size),
+        #     patch_size=(2, 4, 4),
+        #     in_chans=5,
+        #     embed_dim=embed_dim
+        # )
         reduced_grid=(1, self.grid_size//4,self.grid_size//4)
         self.incremental_step=0
         self.skip_steps=[]
@@ -303,12 +302,11 @@ class Pangu(pl.LightningModule):
 
         def save_skip(module, input, output):
             #each time something goes throuogh this layer, add it to a list of skipped steps 
-            # print("incremental step: ", self.incremental_step)
-            # print("output shape: ", output.shape)
             self.skip_steps.append(output)
-            
-
-            # self.skip = output
+            #This is are all appended at the end of all time steps in the model later, 
+            #this may be the wrong approach? 
+            #We could concat and do patch recovery at each step, but I think this is more efficient for avoiding those steps?
+            #We should however, possibly inspect how patch recovery works with the skip steps and check this is sensible
 
         self.skiphook = self.layer1.register_forward_hook(save_skip)
         
@@ -349,7 +347,7 @@ class Pangu(pl.LightningModule):
         # The outputs of the 2nd encoder layer and the 7th decoder layer are concatenated along the channel dimension.
         self.patchrecovery2d = PatchRecovery2D((self.grid_size, self.grid_size), (4, 4), (1+self.time_steps) * embed_dim, 5)
         # self.patchrecovery3d = PatchRecovery3D((5,300,300), (2, 4, 4), 2 * embed_dim, 5)
-
+        
     def forward(self, x):#, surface_mask, upper_air):
         """
         Args:
@@ -396,7 +394,7 @@ class Pangu(pl.LightningModule):
         for t in range(self.time_steps):
             x = self(x)
         x = torch.concat([x, *self.skip_steps], dim=-1)
-        print("x shape after concat: ", x.shape)
+        # print("x shape after concat: ", x.shape)
         x = x.transpose(1, 2).unflatten(2,self.reduced_grid)
 
         y_hat = self.patchrecovery2d(x)
@@ -432,7 +430,10 @@ class Pangu(pl.LightningModule):
         x, y = batch
         for t in range(self.time_steps):
             x = self(x)
-        y_hat = torch.concat([x, *self.skip_steps], dim=-1)
+        y_hat = torch.concat([x, *self.skip_steps], dim=-1) 
+        ##future investigation - is how this step works with the skip steps correct...
+        # as time steps increase, the patch recovery mechanism changes, 
+        #Therefore, some investigation is needed to ensure that the model is correct and works for a single time step. 
         y_hat = y_hat.transpose(1, 2).unflatten(2,self.reduced_grid)
         # y_hat = self.patchrecovery3d(y_hat)
         y_hat = self.patchrecovery2d(y_hat)

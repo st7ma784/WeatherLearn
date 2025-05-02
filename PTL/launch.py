@@ -20,11 +20,12 @@ def train(config={
 
 
     #### EDIT HERE FOR DIFFERENT VERSIONS OF A MODEL
-    
+
     minioClient = {"host": config["MINIOHost"], "port": config["MINIOPort"], "access_key": config["MINIOAccesskey"]
                     , "secret_key": config["MINIOSecret"]}
     config.update({"minioClient": minioClient})
     model=Pangu(**config)
+
     dataModule=DatasetFromMinioBucket(**config)
 
     print("building model")
@@ -76,7 +77,9 @@ def train(config={
             fast_dev_run=config.get("fast_dev_run", False),
             precision=p
     )
-    # model=torch.compile(model,mode="reduce-overhead",fullgraph=True)
+    # import torch._dynamo
+    # torch._dynamo.config.suppress_errors = True
+    # model=torch.compile(model, backend="eager")
 
     trainer.fit(model,dataModule)
 

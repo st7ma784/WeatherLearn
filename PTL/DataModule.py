@@ -81,6 +81,11 @@ class SuperDARNDataset(IterableDataset):
         self.batch_size = batch_size
         self.grid_size = kwargs.get("grid_size", 300)
         self.time_step=kwargs.get("time_step", 1)
+        self.device="cpu"
+        # if torch.cuda.is_available():
+        #     if kwargs.get("preProcess", False):
+        #         self.device = torch.device("cuda:0")
+        #         print("Using GPU for preprocessing")
         try:
             self.minioClient = Minio(miniodict.get("host", "localhost") + ":" 
                                                 + str(miniodict.get("port", 9000)),
@@ -162,12 +167,11 @@ class SuperDARNDataset(IterableDataset):
 
         return data_tensor
         
-    def process_conv_to_grid(self, data):
+    def process_conv_to_grid(self, data,device="cpu"):
         #use the mlat, mlon to gaussian splat onto a x,y grid and stack
         # data_tensor = torch.zeros(5, self.grid_size, self.grid_size)
         #we're going to sample the data onto a 300x300 grid
         #we're going to use a gaussian kernel to splat the data onto the grid
-        
         #step1: create a meshgrid
         # x = np.linspace(self.location["min_mlon"], self.location["max_mlon"], self.grid_size)
         # y = np.linspace(self.location["min_mlat"], self.location["max_mlat"], self.grid_size)
@@ -190,7 +194,8 @@ class SuperDARNDataset(IterableDataset):
             return None
         Coords=np.concatenate(Coords, axis=1)
         #convert to tensor
-        Coords=torch.tensor(Coords, dtype=torch.float32)
+
+        Coords=torch.tensor(Coords, dtype=torch.float32,device=device)
         now=time.time()
         time_dif=now-start_time
         # print("time to process coords: ", time_dif)
@@ -198,7 +203,7 @@ class SuperDARNDataset(IterableDataset):
         x= Coords[0]
         y= Coords[1]
         Data=Coords[2:7].unsqueeze(1).unsqueeze(1)
-        x_tensor=torch.zeros(self.grid_size,Coords.shape[1])
+        x_tensor=torch.zeros(self.grid_size,Coords.shape[1],device=Coords.device)
         x_tensor=x_tensor+torch.linspace(self.location["min_mlon"], self.location["max_mlon"], self.grid_size).reshape(-1,1)
         x=x.reshape(1,-1)
 
@@ -206,7 +211,7 @@ class SuperDARNDataset(IterableDataset):
         #both shapes are (grid_size, Coords.shape[0])
         x_diff=(x_tensor-x).pow(2) 
 
-        y_tensor=torch.zeros(self.grid_size,Coords.shape[1])
+        y_tensor=torch.zeros(self.grid_size,Coords.shape[1],device=Coords.device)
         y_tensor=y_tensor+torch.linspace(self.location["min_mlat"], self.location["max_mlat"], self.grid_size).reshape(-1,1)
         y=y.reshape(1,-1)
         y_diff=(y_tensor-y).pow(2)
@@ -245,6 +250,7 @@ class SuperDARNDataset(IterableDataset):
         # print("Time to process data: ", time.time()-start_time)
         #normalize the data
         data_tensor=data_tensor/torch.norm(data_tensor, dim=[-1,-2], keepdim=True)
+        data_tensor=data_tensor.to(device=torch.device("cpu"), non_blocking=True)
         return data_tensor
 
     def process_data_fitacf(self, data1):
@@ -474,6 +480,11 @@ class DatasetFromMinioBucket(LightningDataModule):
             if not os.path.exists(os.path.join(self.data_dir, "data",str(self.dataset_hash))):
                 os.makedirs(os.path.join(self.data_dir, "data",str(self.dataset_hash)))            
                 dataset = SuperDARNDatasetFolder(self.data_dir, self.batch_size, self.method, self.window_size, **self.kwargs)
+                # cpu_count=1
+                # if torch.cuda.is_available():
+                #     self.device = torch.device("cuda:0")
+                #     print("Using GPU for preprocessing")
+                # else:
                 cpu_count = os.cpu_count() if os.getenv("HPC", "False") == "False" else min(os.cpu_count(), 8)# cap cpus at 8 on HPC to avoid OOM errors
                 Data=DataLoader(dataset, batch_size=16, shuffle=False, num_workers=cpu_count, pin_memory=False)
                 save_dataset_to_disk(Data, os.path.join(self.data_dir, "data",str(self.dataset_hash)))
@@ -626,6 +637,8 @@ class DatasetFromPresaved(Dataset):
         return dataA, dataB
 
 if __name__ == "__main__":
+    # Set multiprocessing start method to 'spawn' to avoid CUDA initialization issues
+   
     #test the dataloader
     from minio import Minio
     import argparse
