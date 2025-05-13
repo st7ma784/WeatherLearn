@@ -5,13 +5,12 @@ from torch import nn
 class UpSample(nn.Module):
     """
     Up-sampling operation.
-    Implementation from: https://github.com/198808xc/Pangu-Weather/blob/main/pseudocode.py
 
     Args:
         in_dim (int): Number of input channels.
         out_dim (int): Number of output channels.
-        input_resolution (tuple[int]): [pressure levels, latitude, longitude]
-        output_resolution (tuple[int]): [pressure levels, latitude, longitude]
+        input_resolution (tuple[int]): [pressure levels, latitude, longitude].
+        output_resolution (tuple[int]): [pressure levels, latitude, longitude].
     """
 
     def __init__(self, in_dim, out_dim, input_resolution, output_resolution):
@@ -24,8 +23,13 @@ class UpSample(nn.Module):
 
     def forward(self, x: torch.Tensor):
         """
+        Forward pass for up-sampling.
+
         Args:
-            x (torch.Tensor): (B, N, C)
+            x (torch.Tensor): Input tensor of shape (B, N, C).
+
+        Returns:
+            torch.Tensor: Up-sampled tensor.
         """
         B, N, C = x.shape
         in_pl, in_lat, in_lon = self.input_resolution
@@ -54,13 +58,12 @@ class UpSample(nn.Module):
 
 class DownSample(nn.Module):
     """
-    Down-sampling operation
-    Implementation from: https://github.com/198808xc/Pangu-Weather/blob/main/pseudocode.py
+    Down-sampling operation.
 
     Args:
         in_dim (int): Number of input channels.
-        input_resolution (tuple[int]): [pressure levels, latitude, longitude]
-        output_resolution (tuple[int]): [pressure levels, latitude, longitude]
+        input_resolution (tuple[int]): [pressure levels, latitude, longitude].
+        output_resolution (tuple[int]): [pressure levels, latitude, longitude].
     """
 
     def __init__(self, in_dim, input_resolution, output_resolution):
@@ -89,7 +92,16 @@ class DownSample(nn.Module):
             (pad_left, pad_right, pad_top, pad_bottom, pad_front, pad_back)
         )
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor):
+        """
+        Forward pass for down-sampling.
+
+        Args:
+            x (torch.Tensor): Input tensor of shape (B, N, C).
+
+        Returns:
+            torch.Tensor: Down-sampled tensor.
+        """
         B, N, C = x.shape
         in_pl, in_lat, in_lon = self.input_resolution
         out_pl, out_lat, out_lon = self.output_resolution
@@ -104,11 +116,17 @@ class DownSample(nn.Module):
         x = self.linear(x)
         return x
 
+
 def crop2d(x: torch.Tensor, resolution):
     """
+    Crops a 2D tensor to the specified resolution.
+
     Args:
-        x (torch.Tensor): B, C, Lat, Lon
-        resolution (tuple[int]): Lat, Lon
+        x (torch.Tensor): Input tensor of shape (B, C, Lat, Lon).
+        resolution (tuple[int]): Target resolution (Lat, Lon).
+
+    Returns:
+        torch.Tensor: Cropped tensor.
     """
     _, _, Lat, Lon = x.shape
     lat_pad = Lat - resolution[0]
@@ -125,11 +143,16 @@ def crop2d(x: torch.Tensor, resolution):
 
 def crop3d(x: torch.Tensor, resolution):
     """
+    Crops a 3D tensor to the specified resolution.
+
     Args:
-        x (torch.Tensor): B, C, Pl, Lat, Lon
-        resolution (tuple[int]): Pl, Lat, Lon
+        x (torch.Tensor): Input tensor of shape (B, C, Pl, Lat, Lon).
+        resolution (tuple[int]): Target resolution (Pl, Lat, Lon).
+
+    Returns:
+        torch.Tensor: Cropped tensor.
     """
-    _,  Pl, Lat, Lon,_ = x.shape
+    _, Pl, Lat, Lon, _ = x.shape
     pl_pad = Pl - resolution[0]
     lat_pad = Lat - resolution[1]
     lon_pad = Lon - resolution[2]
@@ -143,29 +166,50 @@ def crop3d(x: torch.Tensor, resolution):
     padding_left = lon_pad // 2
     padding_right = lon_pad - padding_left
     return x[:, padding_front: Pl - padding_back, padding_top: Lat - padding_bottom,
-           padding_left: Lon - padding_right,:]
+           padding_left: Lon - padding_right, :]
+
+
 class Crop3D(nn.Module):
+    """
+    Crops a 3D tensor based on specified padding.
+
+    Args:
+        padding (tuple[int]): Padding values (left, right, top, bottom, front, back).
+    """
+
     def __init__(self, padding):
         super().__init__()
-        self.padding_front , self.padding_back = padding[-1], padding[-2]
-        self.padding_top ,self.padding_bottom= padding[2] , padding[3]
-        self.padding_left,self.padding_right= padding[0] , padding[1]
-       
+        self.padding_front, self.padding_back = padding[-1], padding[-2]
+        self.padding_top, self.padding_bottom = padding[2], padding[3]
+        self.padding_left, self.padding_right = padding[0], padding[1]
+
     def forward(self, x: torch.Tensor):
+        """
+        Forward pass for cropping a 3D tensor.
+
+        Args:
+            x (torch.Tensor): Input tensor.
+
+        Returns:
+            torch.Tensor: Cropped tensor.
+        """
         return x[:,
-                self.padding_front: ,
+                self.padding_front:,
                 self.padding_top: -self.padding_bottom,
-                self.padding_left: -self.padding_right, 
+                self.padding_left: -self.padding_right,
                 :]
+
 
 def get_pad3d(input_resolution, window_size):
     """
+    Calculates padding for a 3D tensor to align with the window size.
+
     Args:
-        input_resolution (tuple[int]): (Pl, Lat, Lon)
-        window_size (tuple[int]): (Pl, Lat, Lon)
+        input_resolution (tuple[int]): Input resolution (Pl, Lat, Lon).
+        window_size (tuple[int]): Window size (Pl, Lat, Lon).
 
     Returns:
-        padding (tuple[int]): (padding_left, padding_right, padding_top, padding_bottom, padding_front, padding_back)
+        tuple[int]: Padding values (left, right, top, bottom, front, back).
     """
     Pl, Lat, Lon = input_resolution
     win_pl, win_lat, win_lon = window_size
@@ -193,29 +237,31 @@ def get_pad3d(input_resolution, window_size):
 
 def get_pad2d(input_resolution, window_size):
     """
+    Calculates padding for a 2D tensor to align with the window size.
+
     Args:
-        input_resolution (tuple[int]): Lat, Lon
-        window_size (tuple[int]): Lat, Lon
+        input_resolution (tuple[int]): Input resolution (Lat, Lon).
+        window_size (tuple[int]): Window size (Lat, Lon).
 
     Returns:
-        padding (tuple[int]): (padding_left, padding_right, padding_top, padding_bottom)
+        tuple[int]: Padding values (left, right, top, bottom).
     """
     input_resolution = [2] + list(input_resolution)
     window_size = [2] + list(window_size)
     padding = get_pad3d(input_resolution, window_size)
-    return padding[: 4]
+    return padding[:4]
 
 
 class PatchEmbed2D(nn.Module):
     """
-    2D Image to Patch Embedding.
+    Converts a 2D image into patch embeddings.
 
     Args:
-        img_size (tuple[int]): Image size.
-        patch_size (tuple[int]): Patch token size.
-        in_chans (int): Number of input image channels.
-        embed_dim(int): Number of projection output channels.
-        norm_layer (nn.Module, optional): Normalization layer. Default: None
+        img_size (tuple[int]): Image size (Lat, Lon).
+        patch_size (tuple[int]): Patch size (Lat, Lon).
+        in_chans (int): Number of input channels.
+        embed_dim (int): Number of output channels.
+        norm_layer (nn.Module, optional): Normalization layer. Default: None.
     """
 
     def __init__(self, img_size, patch_size, in_chans, embed_dim, norm_layer=None):
@@ -235,29 +281,38 @@ class PatchEmbed2D(nn.Module):
             padding_left = w_pad // 2
             padding_right = int(w_pad - padding_left)
 
-        layerlist=[ nn.ZeroPad2d((padding_left, padding_right, padding_top, padding_bottom)),
-                 nn.Conv2d(in_chans, embed_dim, kernel_size=patch_size, stride=patch_size)
-                    ]   
+        layerlist = [nn.ZeroPad2d((padding_left, padding_right, padding_top, padding_bottom)),
+                     nn.Conv2d(in_chans, embed_dim, kernel_size=patch_size, stride=patch_size)
+                     ]
         if norm_layer is not None:
-                layerlist.append(torch.nn.permute(0, 2, 3, 1))
-                layerlist.append(norm_layer(embed_dim))
-                layerlist.append(torch.nn.permute(0, 3, 1, 2))
-        self.model=nn.Sequential(*layerlist)
+            layerlist.append(torch.nn.permute(0, 2, 3, 1))
+            layerlist.append(norm_layer(embed_dim))
+            layerlist.append(torch.nn.permute(0, 3, 1, 2))
+        self.model = nn.Sequential(*layerlist)
+
     def forward(self, x: torch.Tensor):
-       
+        """
+        Forward pass for patch embedding.
+
+        Args:
+            x (torch.Tensor): Input tensor.
+
+        Returns:
+            torch.Tensor: Patch-embedded tensor.
+        """
         return self.model(x)
 
 
 class PatchEmbed3D(nn.Module):
     """
-    3D Image to Patch Embedding.
+    Converts a 3D image into patch embeddings.
 
     Args:
-        img_size (tuple[int]): Image size.
-        patch_size (tuple[int]): Patch token size.
-        in_chans (int): Number of input image channels.
-        embed_dim(int): Number of projection output channels.
-        norm_layer (nn.Module, optional): Normalization layer. Default: None
+        img_size (tuple[int]): Image size (Pl, Lat, Lon).
+        patch_size (tuple[int]): Patch size (Pl, Lat, Lon).
+        in_chans (int): Number of input channels.
+        embed_dim (int): Number of output channels.
+        norm_layer (nn.Module, optional): Normalization layer. Default: None.
     """
 
     def __init__(self, img_size, patch_size, in_chans, embed_dim, norm_layer=None):
@@ -288,24 +343,34 @@ class PatchEmbed3D(nn.Module):
             (padding_left, padding_right, padding_top, padding_bottom, padding_front, padding_back)
         )
         self.proj = nn.Conv3d(in_chans, embed_dim, kernel_size=patch_size, stride=patch_size)
-        layerlist=[self.pad, self.proj]
+        layerlist = [self.pad, self.proj]
 
         if norm_layer is not None:
             layerlist.append(torch.nn.permute(0, 2, 3, 4, 1))
             layerlist.append(norm_layer(embed_dim))
             layerlist.append(torch.nn.permute(0, 4, 1, 2, 3))
-        self.model=nn.Sequential(*layerlist)
+        self.model = nn.Sequential(*layerlist)
 
     def forward(self, x: torch.Tensor):
+        """
+        Forward pass for patch embedding.
+
+        Args:
+            x (torch.Tensor): Input tensor.
+
+        Returns:
+            torch.Tensor: Patch-embedded tensor.
+        """
         return self.model(x)
+
 
 class PatchRecovery2D(nn.Module):
     """
-    Patch Embedding Recovery to 2D Image.
+    Recovers a 2D image from patch embeddings.
 
     Args:
-        img_size (tuple[int]): Lat, Lon
-        patch_size (tuple[int]): Lat, Lon
+        img_size (tuple[int]): Image size (Lat, Lon).
+        patch_size (tuple[int]): Patch size (Lat, Lon).
         in_chans (int): Number of input channels.
         out_chans (int): Number of output channels.
     """
@@ -314,10 +379,17 @@ class PatchRecovery2D(nn.Module):
         super().__init__()
         self.img_size = img_size
         self.conv = nn.ConvTranspose2d(in_chans, out_chans, patch_size, patch_size)
-        
 
+    def forward(self, x: torch.Tensor):
+        """
+        Forward pass for patch recovery.
 
-    def forward(self, x):
+        Args:
+            x (torch.Tensor): Input tensor.
+
+        Returns:
+            torch.Tensor: Recovered image tensor.
+        """
         output = self.conv(x)
         _, _, H, W = output.shape
         h_pad = H - self.img_size[0]
@@ -334,11 +406,11 @@ class PatchRecovery2D(nn.Module):
 
 class PatchRecovery3D(nn.Module):
     """
-    Patch Embedding Recovery to 3D Image.
+    Recovers a 3D image from patch embeddings.
 
     Args:
-        img_size (tuple[int]): Pl, Lat, Lon
-        patch_size (tuple[int]): Pl, Lat, Lon
+        img_size (tuple[int]): Image size (Pl, Lat, Lon).
+        patch_size (tuple[int]): Patch size (Pl, Lat, Lon).
         in_chans (int): Number of input channels.
         out_chans (int): Number of output channels.
     """
@@ -349,6 +421,15 @@ class PatchRecovery3D(nn.Module):
         self.conv = nn.ConvTranspose3d(in_chans, out_chans, patch_size, patch_size)
 
     def forward(self, x: torch.Tensor):
+        """
+        Forward pass for patch recovery.
+
+        Args:
+            x (torch.Tensor): Input tensor.
+
+        Returns:
+            torch.Tensor: Recovered image tensor.
+        """
         output = self.conv(x)
         _, _, Pl, Lat, Lon = output.shape
 
@@ -369,23 +450,25 @@ class PatchRecovery3D(nn.Module):
                padding_top: Lat - padding_bottom, padding_left: Lon - padding_right]
 
 
-
 def window_partition(x: torch.Tensor, window_size):
     """
+    Partitions a tensor into windows.
+
     Args:
-        x: (B, Pl, Lat, Lon, C)
-        window_size (tuple[int]): [win_pl, win_lat, win_lon]
+        x (torch.Tensor): Input tensor of shape (B, Pl, Lat, Lon, C).
+        window_size (tuple[int]): Window size (Pl, Lat, Lon).
 
     Returns:
-        windows: (B*num_lon, num_pl*num_lat, win_pl, win_lat, win_lon, C)
+        torch.Tensor: Partitioned windows.
     """
     B, Pl, Lat, Lon, C = x.shape
     win_pl, win_lat, win_lon = window_size
     x = x.view(B, Pl // win_pl, win_pl, Lat // win_lat, win_lat, Lon // win_lon, win_lon, C)
     windows = x.permute(0, 5, 1, 3, 2, 4, 6, 7).contiguous().view(
         -1, (Pl // win_pl) * (Lat // win_lat), win_pl, win_lat, win_lon, C
-    ) 
+    )
     return windows
+
 
 class WindowPartition(nn.Module):
     """
@@ -393,7 +476,7 @@ class WindowPartition(nn.Module):
 
     Args:
         input_shape (tuple[int]): Shape of the input tensor (B, Pl, Lat, Lon, C).
-        window_size (tuple[int]): Window size [win_pl, win_lat, win_lon].
+        window_size (tuple[int]): Window size (Pl, Lat, Lon).
     """
 
     def __init__(self, input_shape, window_size):
@@ -401,72 +484,95 @@ class WindowPartition(nn.Module):
         self.input_shape = input_shape
         self.window_size = window_size
         self.view_shape = (-1, (input_shape[1] // window_size[0]) * (input_shape[2] // window_size[1]),
-                           window_size[0]* window_size[1]* window_size[2], input_shape[-1])
+                           window_size[0] * window_size[1] * window_size[2], input_shape[-1])
         self.xview_shape = (-1, input_shape[1] // window_size[0], window_size[0],
                             input_shape[2] // window_size[1], window_size[1], input_shape[3] // window_size[2],
                             window_size[2], input_shape[-1])
+
     def forward(self, x: torch.Tensor):
         """
+        Forward pass for window partitioning.
+
         Args:
-            x: (B, Pl, Lat, Lon, C)
+            x (torch.Tensor): Input tensor.
 
         Returns:
-            windows: (B*num_lon, num_pl*num_lat, win_pl, win_lat, win_lon, C)
+            torch.Tensor: Partitioned windows.
         """
-        # B, Pl, Lat, Lon, C = self.input_shape
-        # win_pl, win_lat, win_lon = self.window_size
         x = x.view(*self.xview_shape)
         windows = x.permute(0, 5, 1, 3, 2, 4, 6, 7).contiguous().view(*self.view_shape)
         return windows
-    
 
-def window_reverse(windows, window_size, Pl, Lat, Lon,dim):
+
+def window_reverse(windows, window_size, Pl, Lat, Lon, dim):
     """
+    Reverses the window partitioning operation.
+
     Args:
-        windows: (B*num_lon, num_pl*num_lat, win_pl, win_lat, win_lon, C)
-        window_size (tuple[int]): [win_pl, win_lat, win_lon]
-        dim: embedding size of the input tensor so we can use -1 for batch size in the view
+        windows (torch.Tensor): Partitioned windows.
+        window_size (tuple[int]): Window size (Pl, Lat, Lon).
+        Pl (int): Pressure levels.
+        Lat (int): Latitude.
+        Lon (int): Longitude.
+        dim (int): Number of channels.
+
     Returns:
-        x: (B, Pl, Lat, Lon, C)
+        torch.Tensor: Reconstructed tensor.
     """
     win_pl, win_lat, win_lon = window_size
-    # B = int(windows.shape[0] / (Lon / win_lon))
     x = windows.view(-1, Lon // win_lon, Pl // win_pl, Lat // win_lat, win_pl, win_lat, win_lon, dim)
-    x = x.permute(0, 2, 4, 3, 5, 1, 6, 7).contiguous().view(-1, Pl, Lat, Lon, dim) 
+    x = x.permute(0, 2, 4, 3, 5, 1, 6, 7).contiguous().view(-1, Pl, Lat, Lon, dim)
     return x
 
+
 class WindowReverse(nn.Module):
-    def __init__(self, window_size,Pl,Lat,Lon,dim):
+    """
+    Torch module for reversing window partitioning.
+
+    Args:
+        window_size (tuple[int]): Window size (Pl, Lat, Lon).
+        Pl (int): Pressure levels.
+        Lat (int): Latitude.
+        Lon (int): Longitude.
+        dim (int): Number of channels.
+    """
+
+    def __init__(self, window_size, Pl, Lat, Lon, dim):
         super().__init__()
         self.window_size = window_size
-        self.Pl=Pl
-        self.Lat=Lat
-        self.Lon=Lon
-        self.windows_view_shape = (-1 ,Lon//window_size[2], Pl // window_size[0], Lat // window_size[1], window_size[0], window_size[1], window_size[2], dim)
-        self.xview_shape = (-1, self.Pl , self.Lat, self.Lon, dim)
+        self.Pl = Pl
+        self.Lat = Lat
+        self.Lon = Lon
+        self.windows_view_shape = (-1, Lon // window_size[2], Pl // window_size[0], Lat // window_size[1],
+                                   window_size[0], window_size[1], window_size[2], dim)
+        self.xview_shape = (-1, self.Pl, self.Lat, self.Lon, dim)
+
     def forward(self, windows: torch.Tensor):
         """
+        Forward pass for reversing window partitioning.
+
         Args:
-            windows: (B*num_lon, num_pl*num_lat, win_pl, win_lat, win_lon, C)
+            windows (torch.Tensor): Partitioned windows.
 
         Returns:
-            x: (B, Pl, Lat, Lon, C)
+            torch.Tensor: Reconstructed tensor.
         """
-        x = windows.unflatten(2,self.window_size).view(*self.windows_view_shape)
+        x = windows.unflatten(2, self.window_size).view(*self.windows_view_shape)
         x = x.permute(0, 2, 4, 3, 5, 1, 6, 7).contiguous().view(*self.xview_shape)
         return x
 
+
 def get_shift_window_mask(input_resolution, window_size, shift_size):
     """
-    Along the longitude dimension, the leftmost and rightmost indices are actually close to each other.
-    If half windows apper at both leftmost and rightmost positions, they are dircetly merged into one window.
+    Generates a shift window mask for SW-MSA.
+
     Args:
-        input_resolution (tuple[int]): [pressure levels, latitude, longitude]
-        window_size (tuple[int]): Window size [pressure levels, latitude, longitude].
-        shift_size (tuple[int]): Shift size for SW-MSA [pressure levels, latitude, longitude].
+        input_resolution (tuple[int]): Input resolution (Pl, Lat, Lon).
+        window_size (tuple[int]): Window size (Pl, Lat, Lon).
+        shift_size (tuple[int]): Shift size (Pl, Lat, Lon).
 
     Returns:
-        attn_mask: (n_lon, n_pl*n_lat, win_pl*win_lat*win_lon, win_pl*win_lat*win_lon)
+        torch.Tensor: Attention mask.
     """
     Pl, Lat, Lon = input_resolution
     win_pl, win_lat, win_lon = window_size
@@ -496,30 +602,23 @@ def get_shift_window_mask(input_resolution, window_size, shift_size):
 
 def get_earth_position_index(window_size):
     """
-    This function construct the position index to reuse symmetrical parameters of the position bias.
-    implementation from: https://github.com/198808xc/Pangu-Weather/blob/main/pseudocode.py
+    Constructs the position index for earth-specific attention.
 
     Args:
-        window_size (tuple[int]): [pressure levels, latitude, longitude]
+        window_size (tuple[int]): Window size (Pl, Lat, Lon).
 
     Returns:
-        position_index (torch.Tensor): [win_pl * win_lat * win_lon, win_pl * win_lat * win_lon]
+        torch.Tensor: Position index tensor.
     """
     win_pl, win_lat, win_lon = window_size
-    # Index in the pressure level of query matrix
     coords_zi = torch.arange(win_pl)
-    # Index in the pressure level of key matrix
     coords_zj = -torch.arange(win_pl) * win_pl
 
-    # Index in the latitude of query matrix
     coords_hi = torch.arange(win_lat)
-    # Index in the latitude of key matrix
     coords_hj = -torch.arange(win_lat) * win_lat
 
-    # Index in the longitude of the key-value pair
     coords_w = torch.arange(win_lon)
 
-    # Change the order of the index to calculate the index in total
     coords_1 = torch.stack(torch.meshgrid([coords_zi, coords_hi, coords_w]))
     coords_2 = torch.stack(torch.meshgrid([coords_zj, coords_hj, coords_w]))
     coords_flatten_1 = torch.flatten(coords_1, 1)
@@ -527,12 +626,10 @@ def get_earth_position_index(window_size):
     coords = coords_flatten_1[:, :, None] - coords_flatten_2[:, None, :]
     coords = coords.permute(1, 2, 0).contiguous()
 
-    # Shift the index for each dimension to start from 0
     coords[:, :, 2] += win_lon - 1
     coords[:, :, 1] *= 2 * win_lon - 1
     coords[:, :, 0] *= (2 * win_lon - 1) * win_lat * win_lat
 
-    # Sum up the indexes in three dimensions
     position_index = coords.sum(-1)
 
     return position_index
