@@ -1,18 +1,23 @@
-version: '3.8'
+version: '3.8'  # Specifies the version of the Docker Compose file format.
 
 services:
   minio:
-    image: minio/minio
-    container_name: minio
+    # Defines the MinIO service, which is an object storage server.
+    image: minio/minio  # Specifies the Docker image to use for the MinIO service.
+    container_name: minio  # Sets the name of the container to "minio".
     ports:
-      - "9000:9000"
-      - "9001:9001"
+      - "9000:9000"  # Maps port 9000 on the host to port 9000 in the container (MinIO API).
+      - "9001:9001"  # Maps port 9001 on the host to port 9001 in the container (MinIO Console).
     environment:
-      MINIO_ROOT_USER: minioadmin
-      MINIO_ROOT_PASSWORD: minioadmin
+      # Sets environment variables for the MinIO service.
+      MINIO_ROOT_USER: minioadmin  # Specifies the root username for MinIO.
+      MINIO_ROOT_PASSWORD: minioadmin  # Specifies the root password for MinIO.
     volumes:
-      - minio-data:/data
+      # Mounts a volume for persistent storage of MinIO data.
+      - minio-data:/data  # Maps the named volume "minio-data" to the "/data" directory in the container.
     command: server /data --console-address ":9001" --address ":9000"
+      # Specifies the command to run the MinIO server, with the data directory and console/API addresses.
 
 volumes:
   minio-data:
+    # Defines a named volume "minio-data" for persistent storage.

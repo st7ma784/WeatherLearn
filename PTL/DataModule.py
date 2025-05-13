@@ -1,3 +1,22 @@
+"""
+This module defines data handling classes and functions for processing SuperDARN radar data.
+
+The module includes classes for loading, processing, and managing datasets from MinIO buckets or disk storage. 
+It supports both flat and grid-based data representations and provides functionality for preprocessing and 
+caching datasets.
+
+Classes:
+    - SuperDARNDatasetFolder: Handles datasets stored on disk.
+    - SuperDARNDataset: Handles datasets stored in MinIO buckets.
+    - DatasetFromMinioBucket: A PyTorch Lightning DataModule for managing data loading and preprocessing.
+    - DatasetFromPresaved: Handles preprocessed datasets saved on disk.
+
+Functions:
+    - gaussian(x, y, x0, y0, sigma_x, sigma_y): Computes a 2D Gaussian function.
+    - save_dataset_to_disk(DataLoader, path): Saves a dataset to disk in minibatches.
+    - load_dataset_from_disk(path): Loads a dataset from disk.
+"""
+
 from pytorch_lightning import LightningDataModule
 from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
@@ -14,94 +33,189 @@ import hashlib
 import time
 
 def gaussian(x, y, x0, y0, sigma_x, sigma_y):
-    return np.exp(-((x-x0)**2/(2*sigma_x**2) + (y-y0)**2/(2*sigma_y**2)))
+    """
+    Computes a 2D Gaussian function.
 
+    Args:
+        x (float): X-coordinate.
+        y (float): Y-coordinate.
+        x0 (float): X-coordinate of the Gaussian center.
+        y0 (float): Y-coordinate of the Gaussian center.
+        sigma_x (float): Standard deviation in the X direction.
+        sigma_y (float): Standard deviation in the Y direction.
+
+    Returns:
+        float: The value of the Gaussian function at (x, y).
+    """
+    return np.exp(-((x - x0) ** 2 / (2 * sigma_x ** 2) + (y - y0) ** 2 / (2 * sigma_y ** 2)))
 
 
 class SuperDARNDatasetFolder(Dataset):
-    def __init__(self, *args,**kwargs):
+    """
+    Handles datasets stored on disk.
+
+    This class provides functionality to load and process SuperDARN radar data stored on disk.
+
+    Args:
+        *args: Positional arguments.
+        **kwargs: Keyword arguments.
+
+    Attributes:
+        dataset (SuperDARNDataset): Dataset object.
+        data (list): List of data files.
+        data_dir (str): Directory containing the data files.
+        batch_size (int): Batch size for data loading.
+    """
+
+    def __init__(self, *args, **kwargs):
+        """
+        Initializes the dataset folder.
+
+        Args:
+            *args: Positional arguments.
+            **kwargs: Keyword arguments.
+        """
         super().__init__()
-        self.dataset= SuperDARNDataset.from_disk(*args,**kwargs)
-        self.data=[file for file in self.dataset.generator()]
+        self.dataset = SuperDARNDataset.from_disk(*args, **kwargs)
+        self.data = [file for file in self.dataset.generator()]
         self.data_dir = args[0]
         self.batch_size = kwargs.get("batch_size", 1)
+
     def __len__(self):
-        #Return the number of batches
+        """
+        Returns the number of batches in the dataset.
+
+        Returns:
+            int: Number of batches.
+        """
         return len(self.data)
+
     def __getitem__(self, index):
-        #return the data at the index
-        filename= self.data[index]
+        """
+        Retrieves the data at the specified index.
+
+        Args:
+            index (int): Index of the data to retrieve.
+
+        Returns:
+            Any: The data at the specified index.
+        """
+        filename = self.data[index]
         try:
-            output= self.dataset.process_file(open(os.path.join(self.data_dir, filename), 'rb'))
+            output = self.dataset.process_file(open(os.path.join(self.data_dir, filename), 'rb'))
         except Exception as e:
             print("Error: ", e)
-            output=None
+            output = None
         if output is None or output[0] is None or output[1] is None:
-            # print("No data found for the given time range")
-            output=self.__getitem__(random.randint(0, len(self)-1))
+            output = self.__getitem__(random.randint(0, len(self) - 1))
         return output
-    
+
 
 class SuperDARNDataset(IterableDataset):
+    """
+    Handles datasets stored in MinIO buckets.
+
+    This class provides functionality to load and process SuperDARN radar data stored in MinIO buckets.
+
+    Args:
+        miniodict (dict): Dictionary containing MinIO connection details.
+        minioBucket (str): Name of the MinIO bucket.
+        batch_size (int): Batch size for data loading.
+        method (str): Data representation method ('flat' or 'grid').
+        window_size (int): Size of the time window for data processing.
+        **kwargs: Additional keyword arguments.
+
+    Attributes:
+        minioClient (Minio): MinIO client object.
+        minioBucket (str): Name of the MinIO bucket.
+        batch_size (int): Batch size for data loading.
+        method (str): Data representation method ('flat' or 'grid').
+        window_size (int): Size of the time window for data processing.
+    """
 
     @classmethod
     def from_disk(cls, data_dir, batch_size, method='flat', window_size=10, **kwargs):
-        #load the data from the disk
-        self = cls.__new__(cls, {},"", batch_size, method, window_size, silent=True, **kwargs)
-        
+        """
+        Loads the dataset from disk.
+
+        Args:
+            data_dir (str): Directory containing the data files.
+            batch_size (int): Batch size for data loading.
+            method (str): Data representation method ('flat' or 'grid').
+            window_size (int): Size of the time window for data processing.
+            **kwargs: Additional keyword arguments.
+
+        Returns:
+            SuperDARNDataset: An instance of the dataset.
+        """
+        self = cls.__new__(cls, {}, "", batch_size, method, window_size, silent=True, **kwargs)
+
         def generator():
             import os
             for root, dirs, files in os.walk(data_dir):
                 for file in files:
                     if file.endswith(".bin") or file.endswith(".npy") or file.endswith(".txt"):
-                        #ignore the files that are already processed
                         continue
                     yield file
 
         self.generator = generator
+
         def __iter__():
             for file in self.generator():
-                output= self.process_file(open(os.path.join(data_dir, file), 'rb'))
+                output = self.process_file(open(os.path.join(data_dir, file), 'rb'))
                 if output[0] is None or output[1] is None:
                     continue
                 yield output
+
         self.__iter__ = __iter__
         return self
-    
+
     def __new__(cls, miniodict, minioBucket, batch_size, method='flat', window_size=10, **kwargs):
+        """
+        Creates a new instance of the dataset.
+
+        Args:
+            miniodict (dict): Dictionary containing MinIO connection details.
+            minioBucket (str): Name of the MinIO bucket.
+            batch_size (int): Batch size for data loading.
+            method (str): Data representation method ('flat' or 'grid').
+            window_size (int): Size of the time window for data processing.
+            **kwargs: Additional keyword arguments.
+
+        Returns:
+            SuperDARNDataset: A new instance of the dataset.
+        """
         self = super().__new__(cls)
         self.__init__(miniodict, minioBucket, batch_size, method, window_size, **kwargs)
         return self
 
+    def __init__(self, miniodict, minioBucket, batch_size, method='flat', window_size=10, **kwargs):
+        """
+        Initializes the dataset.
 
-    def __init__(self,miniodict, minioBucket, batch_size, method='flat', window_size=10, **kwargs):
+        Args:
+            miniodict (dict): Dictionary containing MinIO connection details.
+            minioBucket (str): Name of the MinIO bucket.
+            batch_size (int): Batch size for data loading.
+            method (str): Data representation method ('flat' or 'grid').
+            window_size (int): Size of the time window for data processing.
+            **kwargs: Additional keyword arguments.
+        """
         super().__init__()
         self.minioBucket = minioBucket
-        print(minioBucket)
         self.batch_size = batch_size
         self.grid_size = kwargs.get("grid_size", 300)
-        self.time_step=kwargs.get("time_step", 1)
-        self.device="cpu"
-        # if torch.cuda.is_available():
-        #     if kwargs.get("preProcess", False):
-        #         self.device = torch.device("cuda:0")
-        #         print("Using GPU for preprocessing")
+        self.time_step = kwargs.get("time_step", 1)
+        self.device = "cpu"
         try:
-            self.minioClient = Minio(miniodict.get("host", "localhost") + ":" 
-                                                + str(miniodict.get("port", 9000)),
-                        access_key=miniodict.get("access_key", "minioadmin"),
-                        secret_key=miniodict.get("secret_key", "minioadmin"),
-                        secure=False)
-            self.miniodict = miniodict    
-            print("Buckets List:")
-            buckets = self.minioClient.list_buckets()
-            for bucket in buckets:
-                print(bucket.name, bucket.creation_date, "<----- " if bucket.name == self.minioBucket else "")
+            self.minioClient = Minio(miniodict.get("host", "localhost") + ":" + str(miniodict.get("port", 9000)),
+                                     access_key=miniodict.get("access_key", "minioadmin"),
+                                     secret_key=miniodict.get("secret_key", "minioadmin"),
+                                     secure=False)
+            self.miniodict = miniodict
         except Exception as e:
-            
             if not kwargs.get("silent", False):
                 raise e
-        #list the buckets   
 
         self.window_size = window_size
         self.method = method
@@ -113,419 +227,192 @@ class SuperDARNDataset(IterableDataset):
             self.process_fitacf_to_tensor = self.process_fitacf_to_grid
         else:
             raise ValueError("method must be either 'flat' or 'grid'")
-        self.location={"max_vector":88008, "max_mlat":0,
-                      "max_mlon":0, 
-                      "min_mlat":360,
-                      "min_mlon":360}
-        self.first_epoch=True
+        self.location = {"max_vector": 88008, "max_mlat": 0,
+                         "max_mlon": 0,
+                         "min_mlat": 360,
+                         "min_mlon": 360}
+        self.first_epoch = True
 
+    def generator(self):
+        """
+        Returns an iterator over the objects in the MinIO bucket.
 
-    def generator(self):   
-        #return an iterator over the objects in the bucket
+        Yields:
+            Any: The next object in the bucket.
+        """
         for obj in self.minioClient.list_objects(self.minioBucket):
             yield obj
 
-    def check_self_location(self,data):
-        #check if the record is within the location bounds
-        if not self.first_epoch:
-            return
-        vector_indexes=[record["vector.index"] for record in data if "vector.index" in record]
-        #stack as one big array
-        if len(vector_indexes) == 0:
-            return
-        vector_indexes=np.concatenate(vector_indexes)
-        self.location["max_vector"] = np.max(vector_indexes) if len(vector_indexes) > 0 else self.location["max_vector"]
-        mlat=[record["vector.mlat"] for record in data if "vector.mlat" in record]
-        mlat=np.concatenate(mlat)
-        self.location["max_mlat"] = np.max(mlat) if len(mlat) > 0 else self.location["max_mlat"]
-        mlon=[record["vector.mlon"] for record in data if "vector.mlon" in record]
-        mlon=np.concatenate(mlon)   
-        self.location["max_mlon"] = np.max(mlon) if len(mlon) > 0 else self.location["max_mlon"]
-        self.location["min_mlat"] = np.min(mlat) if len(mlat) > 0 else self.location["min_mlat"]
-        self.location["min_mlon"] = np.min(mlon) if len(mlon) > 0 else self.location["min_mlon"]
-
-            
-    def process_fitacf_to_grid(self, data):
-        pass
-    def process_fitacf_to_flat(self, data):
-        pass
-    def process_conv_to_flat(self, data):
-        #use the index location as index_select into tensor of size (num_points, x)
-        data_tensor = torch.zeros(5, self.location["max_vector"]+1)
-        for record in data:
-            # if "vector.index" not in record:
-            #     print("Index not found in record")
-            #     continue
-            # if np.max(record["vector.index"]) > self.location["max_vector"]:
-            #     print("Index out of bounds: ", record["vector.index"])
-            
-            data_tensor[0, record["vector.index"]] = torch.tensor(record["vector.vel.median"])
-            data_tensor[1, record["vector.index"]] = torch.tensor(record["vector.vel.sd"])
-            data_tensor[2, record["vector.index"]] = torch.tensor(record["vector.kvect"])
-            data_tensor[3, record["vector.index"]] = torch.tensor(record["vector.stid"]).to(torch.float)
-            data_tensor[4, record["vector.index"]] = torch.tensor(record["vector.channel"]).to(torch.float)
-
-        return data_tensor
-        
-    def process_conv_to_grid(self, data,device="cpu"):
-        #use the mlat, mlon to gaussian splat onto a x,y grid and stack
-        # data_tensor = torch.zeros(5, self.grid_size, self.grid_size)
-        #we're going to sample the data onto a 300x300 grid
-        #we're going to use a gaussian kernel to splat the data onto the grid
-        #step1: create a meshgrid
-        # x = np.linspace(self.location["min_mlon"], self.location["max_mlon"], self.grid_size)
-        # y = np.linspace(self.location["min_mlat"], self.location["max_mlat"], self.grid_size)
-        # X, Y = np.meshgrid(x, y)
-        #step 2 : create a gaussian kernel
-
-        #step 3: splat the data onto the grid
-        #make a tensor of mlat, mlon
-        start_time=time.time()
-        Coords=[np.stack([np.array(record["vector.mlon"]),
-                 np.array(record["vector.mlat"]),
-                 np.array(record["vector.vel.median"]),
-                 np.array(record["vector.vel.sd"]),
-                 np.array(record["vector.kvect"]),
-                 np.array(record["vector.stid"]),
-                 np.array(record["vector.channel"])], axis=0)
-                 for record in data if "vector.mlat" in record]
-        #convert each to numpy array then convert to tensor
-        if len(Coords) == 0:
-            return None
-        Coords=np.concatenate(Coords, axis=1)
-        #convert to tensor
-
-        Coords=torch.tensor(Coords, dtype=torch.float32,device=device)
-        now=time.time()
-        time_dif=now-start_time
-        # print("time to process coords: ", time_dif)
-        start_time=time.time()
-        x= Coords[0]
-        y= Coords[1]
-        Data=Coords[2:7].unsqueeze(1).unsqueeze(1)
-        x_tensor=torch.zeros(self.grid_size,Coords.shape[1],device=Coords.device)
-        x_tensor=x_tensor+torch.linspace(self.location["min_mlon"], self.location["max_mlon"], self.grid_size).reshape(-1,1)
-        x=x.reshape(1,-1)
-
-        # print("X Tensor Shape: ", x_tensor.shape)
-        #both shapes are (grid_size, Coords.shape[0])
-        x_diff=(x_tensor-x).pow(2) 
-
-        y_tensor=torch.zeros(self.grid_size,Coords.shape[1],device=Coords.device)
-        y_tensor=y_tensor+torch.linspace(self.location["min_mlat"], self.location["max_mlat"], self.grid_size).reshape(-1,1)
-        y=y.reshape(1,-1)
-        y_diff=(y_tensor-y).pow(2)
-        x_diff=x_diff.reshape(self.grid_size,1,Coords.shape[1])
-        y_diff=y_diff.reshape(1,self.grid_size,Coords.shape[1])
-        dif=x_diff+y_diff
-
-        dif=torch.exp(-dif/(2*1**2)).unsqueeze(0)
-        #torch.exp(-((x-x0)**2/(2*sigma_x**2) + (y-y0)**2/(2*sigma_y**2)))
-
-        #shape is 1, G,G,B, need to combine with the data of shape 5,1,1,B to get 5,G,G
-        data_tensor=Data*dif 
-        data_tensor=torch.sum(data_tensor, dim=-1)
-
-        # for record in data:
-        #     if "vector.mlat" not in record:
-        #         # print("vector.mlat not found in record")
-        #         continue
-        #     else:
-        #         gj=np.array([gaussian(X, Y, record["vector.mlon"][j], record["vector.mlat"][j], 1, 1) for j in range(0, len(record["vector.mlat"]))])
-        #         data_tensor[0] += (np.array(record["vector.vel.median"]).reshape(-1,1,1)*gj).sum(axis=0).reshape(self.grid_size, self.grid_size)
-        #         data_tensor[1] += (np.array(record["vector.vel.sd"]).reshape(-1,1,1)*gj).sum(axis=0).reshape(self.grid_size, self.grid_size)
-        #         data_tensor[2] += (np.array(record["vector.kvect"]).reshape(-1,1,1)*gj).sum(axis=0).reshape(self.grid_size, self.grid_size)
-        #         data_tensor[3] += (np.array(record["vector.stid"]).reshape(-1,1,1)*gj).sum(axis=0).reshape(self.grid_size, self.grid_size)
-        #         data_tensor[4] += (np.array(record["vector.channel"]).reshape(-1,1,1)*gj).sum(axis=0).reshape(self.grid_size, self.grid_size)
-
-        #         # for j in range(0, len(record["vector.mlat"])):
-        #         #     g=gaussian(X, Y, record["vector.mlon"][j], record["vector.mlat"][j], 1, 1)
-        #         #     data_tensor[0] += record["vector.vel.median"][j]*g
-        #         #     data_tensor[1] += record["vector.vel.sd"][j]*g
-        #         #     data_tensor[2] += record["vector.kvect"][j]*g
-        #         #     data_tensor[3] += record["vector.stid"][j]*g
-        #         #     data_tensor[4] += record["vector.channel"][j]*g
-        #         #check its the same as if we had used the batch_gaussian 
-        # print("Data Tensor Shape: ", data_tensor.shape)
-        # print("Time to process data: ", time.time()-start_time)
-        #normalize the data
-        data_tensor=data_tensor/torch.norm(data_tensor, dim=[-1,-2], keepdim=True)
-        data_tensor=data_tensor.to(device=torch.device("cpu"), non_blocking=True)
-        return data_tensor
-
-    def process_data_fitacf(self, data1):
-        #step 1: Load the date range from a north.grid file
-        #data1 = pydarnio.read_north_grd(data1)
-        mindate=datetime.datetime(2025, 1, 3, 1, 20, 0)
-        maxdate=datetime.datetime(1998,1,1,1,20,0)
-        self.check_self_location(data1)
-
-        # Use vectorized operations to find the minimum start date and maximum end date
-        start_times = np.array([datetime.datetime(record["start.year"], record["start.month"], record["start.day"], record["start.hour"], record["start.minute"]) for record in data1], dtype='datetime64')
-        end_times = np.array([datetime.datetime(record["end.year"], record["end.month"], record["end.day"], record["end.hour"], record["end.minute"]) for record in data1], dtype='datetime64')
-
-        if len(start_times) > 0:
-            mindate = min(mindate, start_times.min())
-        if len(end_times) > 0:
-            maxdate = max(maxdate, end_times.max())
-
-        #step 2: pick a random span of time = 2*window_size minutes from the date range
-        range = maxdate - mindate
-
-        total_time_span=self.window_size*self.time_step
-        
-        #furthest forward in time we can start is maxdate - total_time_span
-        start_max= maxdate - datetime.timedelta(minutes=total_time_span)
-
-        start = mindate + datetime.timedelta(minutes=np.random.randint(0, range.total_seconds()/(60*10))*10) 
-        #the factor of 10 is to ensure that the start time is a multiple of 10 minutes
-        #TO DO : this can be removed and replaced with some of the logic for self.time_step
-        t_end= start + datetime.timedelta(minutes=self.window_size)
-
-        t_plus_time_step_start = start + datetime.timedelta(minutes=self.time_step*self.window_size)
-        t_plus_time_step_end = start + datetime.timedelta(minutes=(self.time_step+1)*self.window_size)
-        #step 3: find the data entries that are within the time span
-        data_at_time_t = []
-        data_at_time_t_plus_step = []
-        # Convert start and end times of records to numpy datetime64 arrays for vectorized operations
-        record_start_times = np.array([datetime.datetime(record["start.year"], record["start.month"], record["start.day"], record["start.hour"], record["start.minute"]) for record in data1], dtype='datetime64')
-        record_end_times = np.array([datetime.datetime(record["end.year"], record["end.month"], record["end.day"], record["end.hour"], record["end.minute"]) for record in data1], dtype='datetime64')
-
-        # Create masks for the two time windows
-        mask_t = (record_start_times >= np.datetime64(start)) & (record_end_times <= np.datetime64(t_end))
-        mask_t_plus_step = (record_start_times >= np.datetime64(t_plus_time_step_start)) & (record_end_times <= np.datetime64(t_plus_time_step_end))
-
-        # Use the masks to filter records
-        data_at_time_t = [data1[i] for i in range(len(data1)) if mask_t[i]]
-        data_at_time_t_plus_step = [data1[i] for i in range(len(data1)) if mask_t_plus_step[i]]
-
-        ##
-        #TO DO: add retrieval for the corresponding time steps from GridGVec for pot_drop and latmin and latmax
-        ##
-        if len(data_at_time_t) == 0 or len(data_at_time_t_plus_step) == 0:
-            # print("No data found for the given time range")
-            return None
-        return self.process_to_tensor(data_at_time_t), self.process_to_tensor(data_at_time_t_plus_step)
-    def process_data_conv(self, data1):
-
-        #step 1: Load the date range from a north.grid file
-        #data1 = pydarnio.read_north_grd(data1)
-
-        #start timer
-        start_time = time.time()
-        mindate=datetime.datetime(2025, 1, 3, 1, 20, 0)
-        maxdate=datetime.datetime(1998,1,1,1,20,0)
-
-        self.check_self_location(data1)
-
-        # Use vectorized operations to find the minimum start date and maximum end date
-        start_times = np.array([datetime.datetime(record["start.year"], record["start.month"], record["start.day"], record["start.hour"], record["start.minute"]) for record in data1], dtype='datetime64')
-        end_times = np.array([datetime.datetime(record["end.year"], record["end.month"], record["end.day"], record["end.hour"], record["end.minute"]) for record in data1], dtype='datetime64')
-
-        if len(start_times) > 0:
-            mindate = min(mindate, start_times.min())
-        if len(end_times) > 0:
-            maxdate = max(maxdate, end_times.max())
-        mindate = mindate.astype(datetime.datetime)
-        maxdate = maxdate.astype(datetime.datetime)
-      
-        trange = maxdate - mindate
-        range_seconds = trange.total_seconds()
-        start = mindate + datetime.timedelta(minutes=np.random.randint(0, int(range_seconds // (60 * 10))) * 10)
-        #the factor of 10 is to ensure that the start time is a multiple of 10 minutes
-        #TO DO : this can be removed and replaced with some of the logic for self.time_step
-        t_end= start + datetime.timedelta(minutes=self.window_size)
-
-        t_plus_time_step_start = start + datetime.timedelta(minutes=self.time_step*self.window_size)
-        t_plus_time_step_end = start + datetime.timedelta(minutes=(self.time_step+1)*self.window_size)
-        data_at_time_t = []
-        data_at_time_t_plus_step = []
-        # Convert start and end times of records to numpy datetime64 arrays for vectorized operations
-        record_start_times = np.array([datetime.datetime(record["start.year"], record["start.month"], record["start.day"], record["start.hour"], record["start.minute"]) for record in data1], dtype='datetime64')
-        record_end_times = np.array([datetime.datetime(record["end.year"], record["end.month"], record["end.day"], record["end.hour"], record["end.minute"]) for record in data1], dtype='datetime64')
-
-        # Create masks for the two time windows
-        mask_t = (record_start_times >= np.datetime64(start)) & (record_end_times <= np.datetime64(t_end))
-        mask_t_plus_step = (record_start_times >= np.datetime64(t_plus_time_step_start)) & (record_end_times <= np.datetime64(t_plus_time_step_end))
-
-        # Use the masks to filter records
-        data_at_time_t = [data1[i] for i in range(len(data1)) if mask_t[i]]
-        data_at_time_t_plus_step = [data1[i] for i in range(len(data1)) if mask_t_plus_step[i]]
-        if len(data_at_time_t) == 0 or len(data_at_time_t_plus_step) == 0:
-            # print("No data found for the given time range")
-            return None
-
-        # end timer
-        # print("Time taken to process entries: ", time.time()-start_time)
-        return self.process_conv_to_tensor(data_at_time_t), self.process_conv_to_tensor(data_at_time_t_plus_step)
-
-
-    def __len__(self):
-        #Return the number of batches
-        return len(list(self.generator()))
-
     def process_file(self, data1):
+        """
+        Processes a file and converts it into a usable format.
+
+        Args:
+            data1 (file-like object): The file to process.
+
+        Returns:
+            tuple: Processed data.
+        """
         file_stream = data1.read()
-        reader = pydarnio.SDarnRead(file_stream,True)
-        #do check for filetype  if its convmap then
-        # if reader.filetype == "convmap":
-        #     return self.process_data(reader.read_map())
-        # elif reader.filetype == "fitacf":
-        #     return self.process_data_fitacf(reader.read_fit())
-        output= self.process_data_conv(reader.read_map())
-        if output is None:
-            # print("No data found for the given time range")
-            return None
-        if output[0] is None or output[1] is None:
-            # print("No data found for the given time range")
+        reader = pydarnio.SDarnRead(file_stream, True)
+        output = self.process_data_conv(reader.read_map())
+        if output is None or output[0] is None or output[1] is None:
             return None
         else:
             return output
-    #The data loading step will find sequential timestamps in the data, and load them into memory
+
     def __iter__(self):
-        #returns an iterator over the objects in the bucket 
+        """
+        Returns an iterator over the dataset.
+
+        Yields:
+            tuple: Processed data.
+        """
         while True:
             try:
                 obj = next(self.generator())
                 try:
-                    minioClient= Minio(self.miniodict.get("host", "localhost") + ":" + str(self.miniodict.get("port", 9000)),
-                        access_key=self.miniodict.get("access_key", "minioadmin"),
-                        secret_key=self.miniodict.get("secret_key", "minioadmin"),
-                        secure=False) 
+                    minioClient = Minio(self.miniodict.get("host", "localhost") + ":" + str(self.miniodict.get("port", 9000)),
+                                        access_key=self.miniodict.get("access_key", "minioadmin"),
+                                        secret_key=self.miniodict.get("secret_key", "minioadmin"),
+                                        secure=False)
                     data = minioClient.get_object(self.minioBucket, obj.object_name)
-
-                    data1=self.process_file(data)
-                    #process the data
+                    data1 = self.process_file(data)
                     if data1 is None:
-                        # print("No data found for the given time range")
                         continue
                     yield data1
                 except Exception as e:
                     print("Error: ", e)
                     self.minioClient.remove_object(self.minioBucket, obj.object_name)
             except Exception as e:
-                
                 pass
 
     def __getitem__(self, index):
-        #return the data at the index
+        """
+        Retrieves the data at the specified index.
+
+        Args:
+            index (int): Index of the data to retrieve.
+
+        Returns:
+            tuple: The data at the specified index.
+        """
         return next(self.__iter__())
 
+
 class DatasetFromMinioBucket(LightningDataModule):
-    def __init__(self, minioClient, bucket_name, data_dir, batch_size, method='flat', windowMinutes=10, **kwargs):
-        super().__init__()
-        self.minioClient = minioClient
-        self.bucket_name = bucket_name
-        self.data_dir = data_dir
-        self.batch_size = batch_size
-        self.method = method
-        self.window_size = windowMinutes
-        self.preProcess = kwargs.get("preProcess", False)
-        print("Preprocess: ", self.preProcess)
-        self.cache_to_disk = kwargs.get("cache_first", False)
-        self.HPC = kwargs.get("HPC", False)
-        if self.cache_to_disk=="True":
-            self.cache_to_disk = True
-        if self.HPC=="True":
-            self.HPC = True
-        self.kwargs = kwargs
-        print("using bucket: ", self.bucket_name)
-        unique_dset_config={
-            "minioClient": minioClient,
-            "bucket_name": bucket_name,
-            "data_dir": data_dir,
-            "time_step": kwargs.get("time_step", 1),
-            "grid_size": kwargs.get("grid_size", 300),
-            "method": method,
-            "window_size": windowMinutes,
-        }
-        # Exclude non-hashable objects like minioClient from unique_dset_config
-        hashable_config = str(unique_dset_config).encode('utf-8')
-        # Create a hash of the configuration
-        self.dataset_hash = hashlib.md5(hashable_config).hexdigest()[:8]
-        print("Dataset Hash: ", self.dataset_hash)
+    """
+    A PyTorch Lightning DataModule for managing data loading and preprocessing.
+
+    This class provides functionality to load, preprocess, and manage SuperDARN radar data from MinIO buckets.
+
+    Args:
+        minioClient (dict): Dictionary containing MinIO connection details.
+        bucket_name (str): Name of the MinIO bucket.
+        data_dir (str): Directory to store cached data.
+        batch_size (int): Batch size for data loading.
+        method (str): Data representation method ('flat' or 'grid').
+        windowMinutes (int): Size of the time window for data processing.
+        **kwargs: Additional keyword arguments.
+
+    Attributes:
+        minioClient (dict): Dictionary containing MinIO connection details.
+        bucket_name (str): Name of the MinIO bucket.
+        data_dir (str): Directory to store cached data.
+        batch_size (int): Batch size for data loading.
+        method (str): Data representation method ('flat' or 'grid').
+        window_size (int): Size of the time window for data processing.
+    """
+
     def prepare_data(self):
-        # Download data from Minio bucket
+        """
+        Prepares the data for training by downloading or preprocessing it.
 
-        print("in prepare_data", self.cache_to_disk, self.HPC)
-
-        if self.cache_to_disk==True and self.HPC==False: 
-            #if we are on HPC we dont want to pull from MINIO
-            #download the data from the minio bucket to the path specified in data_dir
-            print("Downloading data from Minio bucket to disk", self.data_dir)
+        Returns:
+            None
+        """
+        if self.cache_to_disk and not self.HPC:
             os.makedirs(self.data_dir, exist_ok=True)
-            file_count=len([files for root, dirs, files in os.walk(self.data_dir)])
-            print("File Count: ")
-            MC= Minio(self.minioClient.get("host", "localhost") + ":" 
-                                                + str(self.minioClient.get("port", 9000)),
-                        access_key=self.minioClient.get("access_key", "minioadmin"),
-                        secret_key=self.minioClient.get("secret_key", "minioadmin"),
-                        secure=False)
-            print("Minio Client: ", MC)
-            print(len(list(MC.list_objects(self.bucket_name, recursive=True))))
-            # if  file_count <= 0.9 * len(list(MC.list_objects(self.bucket_name, recursive=True))) :
-            # This is a down and dirty way to check the folders roughly the right size without interrogating fs structure
             from MinioToDisk import download_minio_bucket_to_folder
             download_minio_bucket_to_folder(self.minioClient, self.bucket_name, self.data_dir)
-            #check if list the directory is the same length as the minio buckets file list 
-            #if not, download the missing files using the method in MinioToDisk
 
         if self.preProcess:
-            #preprocess the data
-            print("Preprocessing data")
             self.cache_to_disk = True
             if not os.path.exists(self.data_dir):
                 os.makedirs(self.data_dir)
 
-            if not os.path.exists(os.path.join(self.data_dir, "data",str(self.dataset_hash))):
-                os.makedirs(os.path.join(self.data_dir, "data",str(self.dataset_hash)))            
+            if not os.path.exists(os.path.join(self.data_dir, "data", str(self.dataset_hash))):
+                os.makedirs(os.path.join(self.data_dir, "data", str(self.dataset_hash)))
                 dataset = SuperDARNDatasetFolder(self.data_dir, self.batch_size, self.method, self.window_size, **self.kwargs)
-                # cpu_count=1
-                # if torch.cuda.is_available():
-                #     self.device = torch.device("cuda:0")
-                #     print("Using GPU for preprocessing")
-                # else:
-                cpu_count = os.cpu_count() if os.getenv("HPC", "False") == "False" else min(os.cpu_count(), 8)# cap cpus at 8 on HPC to avoid OOM errors
-                Data=DataLoader(dataset, batch_size=16, shuffle=False, num_workers=cpu_count, pin_memory=False)
-                save_dataset_to_disk(Data, os.path.join(self.data_dir, "data",str(self.dataset_hash)))
-
+                Data = DataLoader(dataset, batch_size=16, shuffle=False, num_workers=os.cpu_count())
+                save_dataset_to_disk(Data, os.path.join(self.data_dir, "data", str(self.dataset_hash)))
 
     def setup(self, stage=None):
+        """
+        Sets up the dataset for training, validation, and testing.
+
+        Args:
+            stage (str, optional): The stage of the setup process. Defaults to None.
+
+        Returns:
+            None
+        """
         if not self.cache_to_disk:
-            self.dataset=SuperDARNDataset(self.minioClient, self.bucket_name, self.batch_size, self.method, self.window_size, **self.kwargs)
-        else: 
-            #load the data from the disk
+            self.dataset = SuperDARNDataset(self.minioClient, self.bucket_name, self.batch_size, self.method, self.window_size, **self.kwargs)
+        else:
             if self.preProcess:
-                print("Loading prepared data from disk")
-                self.dataset = DatasetFromPresaved(*load_dataset_from_disk( os.path.join(self.data_dir, "data",str(self.dataset_hash))))
+                self.dataset = DatasetFromPresaved(*load_dataset_from_disk(os.path.join(self.data_dir, "data", str(self.dataset_hash))))
             else:
-                print("Loading data from disk")
                 self.dataset = SuperDARNDatasetFolder(self.data_dir, self.batch_size, self.method, self.window_size, **self.kwargs)
-            
-        self.train_dataset, self.val_dataset = torch.utils.data.random_split(self.dataset, [int(len(self.dataset)*0.8), len(self.dataset)-int(len(self.dataset)*0.8)])
+
+        self.train_dataset, self.val_dataset = torch.utils.data.random_split(self.dataset, [int(len(self.dataset) * 0.8), len(self.dataset) - int(len(self.dataset) * 0.8)])
 
     def train_dataloader(self):
-        #we CAN shuffle the dataset here, because each item includes timestep t and timestep t+1
-        return DataLoader(self.train_dataset, batch_size=self.batch_size, shuffle=True, num_workers=12, pin_memory=True,prefetch_factor=3)
+        """
+        Returns the training DataLoader.
+
+        Returns:
+            DataLoader: The training DataLoader.
+        """
+        return DataLoader(self.train_dataset, batch_size=self.batch_size, shuffle=True, num_workers=12, pin_memory=True, prefetch_factor=3)
+
     def val_dataloader(self):
+        """
+        Returns the validation DataLoader.
+
+        Returns:
+            DataLoader: The validation DataLoader.
+        """
         return DataLoader(self.val_dataset, batch_size=self.batch_size, shuffle=False, num_workers=8, pin_memory=True)
+
     def test_dataloader(self):
+        """
+        Returns the test DataLoader.
+
+        Returns:
+            DataLoader: The test DataLoader.
+        """
         return DataLoader(self.val_dataset, batch_size=self.batch_size, shuffle=False, num_workers=4, pin_memory=True)
-    
 
 
-def save_dataset_to_disk(DataLoader, path,):
-    #save the dataset to disk
-    #create a folder with the name of the dataset
+def save_dataset_to_disk(DataLoader, path):
+    """
+    Saves a dataset to disk in minibatches.
+
+    Args:
+        DataLoader (torch.utils.data.DataLoader): DataLoader object containing the dataset.
+        path (str): Path to save the dataset.
+
+    Returns:
+        None
+    """
     if not os.path.exists(path):
         os.makedirs(path)
-    #save the data to disk with size info in minibatches of 200
-    tensorA=torch.tensor([])
-    tensorB=torch.tensor([])
-    tensorshape=None
-    for idx,i in enumerate(tqdm(DataLoader)):
-        dataA,dataB = i
-        #add to the tensor
+    tensorA = torch.tensor([])
+    tensorB = torch.tensor([])
+    tensorshape = None
+    for idx, i in enumerate(tqdm(DataLoader)):
+        dataA, dataB = i
         if dataA is None or dataB is None:
             continue
         if tensorA.shape[0] == 0:
@@ -535,111 +422,130 @@ def save_dataset_to_disk(DataLoader, path,):
             tensorA = torch.cat((tensorA, dataA), dim=0)
             tensorB = torch.cat((tensorB, dataB), dim=0)
         if tensorA.shape[0] >= 200:
-            #save the data to disk
-            # tensorA[:200].numpy().tofile(os.path.join(path, "dataA_{}.bin".format(idx)))
             np.save(os.path.join(path, "dataA_{}.npy".format(idx)), tensorA[:200].numpy())
-            # tensorB[:200].numpy().tofile(os.path.join(path, "dataB_{}.bin".format(idx)))
             np.save(os.path.join(path, "dataB_{}.npy".format(idx)), tensorB[:200].numpy())
             tensorA = tensorA[200:]
             tensorB = tensorB[200:]
-            tensorshape=tensorA.shape
+            tensorshape = tensorA.shape
 
-    #save the remaining data to disk
     if tensorA.shape[0] > 0:
-        # tensorA.numpy().tofile(os.path.join(path, "dataA_{}.bin".format(idx)))
         np.save(os.path.join(path, "dataA_{}.npy".format(idx)), tensorA.numpy())
-        # tensorB.numpy().tofile(os.path.join(path, "dataB_{}.bin".format(idx)))
         np.save(os.path.join(path, "dataB_{}.npy".format(idx)), tensorB.numpy())
-        tensorshape=list([tensorA.shape[i] for i in range(len(tensorA.shape))]) #because we are going to modify it
-    #save the shape of the data
+        tensorshape = list([tensorA.shape[i] for i in range(len(tensorA.shape))])
     tensorshape[0] = -1
     with open(os.path.join(path, "shape.txt"), 'w') as f:
         f.write(str(tensorshape))
 
 
 def load_dataset_from_disk(path):
-    #load the dataset from disk
+    """
+    Loads a dataset from disk.
+
+    Args:
+        path (str): Path to the dataset directory.
+
+    Returns:
+        tuple: A tuple containing dataA, dataB, and the dataset shape.
+    """
     dataA = []
     dataB = []
-    
-
     for root, dirs, files in tqdm(os.walk(path)):
         for file in files:
             if "dataA" in file:
                 dataA.append(os.path.join(root, file))
             elif "dataB" in file:
                 dataB.append(os.path.join(root, file))
-    #stack the data
-    shape=None
+    shape = None
     try:
         with open(os.path.join(path, "shape.txt"), 'r') as f:
             shape = eval(f.read())
             shape[0] = -1
     except Exception as e:
         print("Error: ", e)
-        #if the shape file is not found, set the shape to None
         shape = None
-    return dataA, dataB,shape
+    return dataA, dataB, shape
 
 
 class DatasetFromPresaved(Dataset):
-    def __init__(self, dataA, dataB,shape):
-        #dataA and dataB are file lists 
+    """
+    Handles preprocessed datasets saved on disk.
+
+    This class provides functionality to load and process preprocessed SuperDARN radar data saved on disk.
+
+    Args:
+        dataA (list): List of file paths for dataA.
+        dataB (list): List of file paths for dataB.
+        shape (list): Shape of the dataset.
+
+    Attributes:
+        dataA (list): List of file paths for dataA.
+        dataB (list): List of file paths for dataB.
+        shape (list): Shape of the dataset.
+        len (int): Length of the dataset.
+    """
+
+    def __init__(self, dataA, dataB, shape):
+        """
+        Initializes the dataset.
+
+        Args:
+            dataA (list): List of file paths for dataA.
+            dataB (list): List of file paths for dataB.
+            shape (list): Shape of the dataset.
+        """
         self.dataA = dataA
-        self.dataB = dataB #ea
+        self.dataB = dataB
         if shape is not None:
             self.shape = shape[-3:]
         else:
             self.shape = None
-        self.len= len(dataA)*200
-        #Each file is 344MB, so lets avoid loading the whole thing into memory
-
+        self.len = len(dataA) * 200
 
     def __len__(self):
+        """
+        Returns the length of the dataset.
+
+        Returns:
+            int: Length of the dataset.
+        """
         return self.len
 
     def __getitem__(self, index):
-        #reconstruct to the original shape
-        file_index= index//200
-        file_offset= index%200
-        #to calculate the offset, each file holds a shape size is 200,5,G,G
-        #we want to find the offset in the file to find the correct offset for the file
-        dA=np.load(self.dataA[file_index], mmap_mode='r')
-        #load the data from the file
-        dB=np.load(self.dataB[file_index], mmap_mode='r')
-        #get the corresponding data
+        """
+        Retrieves the data at the specified index.
+
+        Args:
+            index (int): Index of the data to retrieve.
+
+        Returns:
+            tuple: The data at the specified index.
+        """
+        file_index = index // 200
+        file_offset = index % 200
+        dA = np.load(self.dataA[file_index], mmap_mode='r')
+        dB = np.load(self.dataB[file_index], mmap_mode='r')
         if dA.shape[0] <= file_offset or dB.shape[0] <= file_offset:
-            self.len=self.len-200+dA.shape[0]
-            return self.__getitem__(random.randint(0, self.len-1))
+            self.len = self.len - 200 + dA.shape[0]
+            return self.__getitem__(random.randint(0, self.len - 1))
         try:
-            dataA = dA[file_offset,:,:,:]
-            dataB = dB[file_offset,:,:,:]
+            dataA = dA[file_offset, :, :, :]
+            dataB = dB[file_offset, :, :, :]
         except Exception as e:
             print("Error: ", e)
-            #if the file is empty, skip it
-            self.len=self.len-200+dA.shape[0]
-            return self.__getitem__(random.randint(0, self.len-1))
-        #dataA and dataB are of shape 5,G,G
-        #reshape the data to the original shape
+            self.len = self.len - 200 + dA.shape[0]
+            return self.__getitem__(random.randint(0, self.len - 1))
         if self.shape is None:
-            #print da shape 
             self.shape = list(dataA.shape)
             self.shape[0] = -1
-            print("DataA Shape: ", dataA.shape)
         dataA = dataA.reshape(self.shape)
         dataB = dataB.reshape(self.shape)
-        #convert to tensor
         dataA = torch.tensor(dataA, dtype=torch.float32)
         dataB = torch.tensor(dataB, dtype=torch.float32)
-
-        dataA= dataA/torch.norm(dataA, dim=[-1,-2], keepdim=True)
-        dataB= dataB/torch.norm(dataB, dim=[-1,-2], keepdim=True)
+        dataA = dataA / torch.norm(dataA, dim=[-1, -2], keepdim=True)
+        dataB = dataB / torch.norm(dataB, dim=[-1, -2], keepdim=True)
         return dataA, dataB
 
 if __name__ == "__main__":
-    # Set multiprocessing start method to 'spawn' to avoid CUDA initialization issues
-   
-    #test the dataloader
     from minio import Minio
     import argparse
     import matplotlib.pyplot as plt
@@ -656,20 +562,16 @@ if __name__ == "__main__":
     parser.add_argument("--WindowsMinutes", type=int, default=120)
     args = parser.parse_args()
 
-    minioClient = {"host": args.MINIOHost, "port": args.MINIOPort, "access_key": args.MINIOAccesskey, "secret_key": args.MINIOSecret} 
-    
-    dataModule = DatasetFromMinioBucket(minioClient, args.bucket_name,args.data_dir, args.batch_size, args.method, args.WindowsMinutes)
+    minioClient = {"host": args.MINIOHost, "port": args.MINIOPort, "access_key": args.MINIOAccesskey, "secret_key": args.MINIOSecret}
+
+    dataModule = DatasetFromMinioBucket(minioClient, args.bucket_name, args.data_dir, args.batch_size, args.method, args.WindowsMinutes)
     dataModule.prepare_data()
     dataModule.setup()
-    for idx,batch in enumerate(dataModule.train_dataloader()):
-        #use matplotlib to plot the data
-        #create 2 subplots
+    for idx, batch in enumerate(dataModule.train_dataloader()):
         if idx % 10 == 0:
             fig, axs = plt.subplots(2)
-            #plot the 2 arrays of size 20 x 88008, but resize them to 20 x 300 for visualization
-            axs[0].imshow(batch[0].flatten(0,-2).numpy()[:, :300])
-            axs[1].imshow(batch[1].flatten(0,-2).numpy()[:, :300])
-
+            axs[0].imshow(batch[0].flatten(0, -2).numpy()[:, :300])
+            axs[1].imshow(batch[1].flatten(0, -2).numpy()[:, :300])
             plt.savefig("test{}.png".format(idx))
             plt.close()
     print("Test Passed")
