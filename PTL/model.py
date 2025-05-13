@@ -8,6 +8,7 @@ import numpy as np
 from utils import get_shift_window_mask, WindowReverse, WindowPartition, PatchEmbed2D, PatchEmbed3D, PatchRecovery2D, get_pad3d, DownSample, UpSample, get_earth_position_index, Crop3D
 import math
 
+
 def norm_cdf(x):
     """
     Computes the standard normal cumulative distribution function.
