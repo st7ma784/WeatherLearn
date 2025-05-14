@@ -10,14 +10,13 @@ Key Features
 ------------
 
 - **File Loading**:
-  - `load_file`: Loads a FITACF file and extracts radar records.
+    - `load_file`: Loads a FITACF file and extracts radar records.
 
 - **FITACF File Processing**:
-  - `process_fitacf_to_filelists`: Processes FITACF files in a folder to create file sets based on time ranges 
-    and radar coverage.
+    - `process_fitacf_to_filelists`: Processes FITACF files in a folder to create file sets based on time ranges and radar coverage.
 
 - **CONVMAP File Association**:
-  - `find_conv_maps_from_filelists`: Finds corresponding CONVMAP files for a list of FITACF file sets.
+    - `find_conv_maps_from_filelists`: Finds corresponding CONVMAP files for a list of FITACF file sets.
 
 Dependencies
 ------------
