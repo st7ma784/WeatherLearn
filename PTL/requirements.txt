@@ -5,3 +5,4 @@ wandb
 tqdm
 pytorch_lightning
 matplotlib
+torch
