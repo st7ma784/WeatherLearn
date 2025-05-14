@@ -1,6 +1,51 @@
 import torch
 from torch import nn
+"""
+Utils Module
+============
 
+This module provides utility classes and functions for tensor operations and model components used in weather 
+prediction tasks. It includes operations for up-sampling, down-sampling, cropping, patch embedding, patch recovery, 
+and window partitioning, as well as helper functions for attention mechanisms and earth-specific computations.
+
+Key Features
+------------
+
+- **Up-Sampling and Down-Sampling**:
+  - `UpSample`: Performs up-sampling operations on tensors.
+  - `DownSample`: Performs down-sampling operations on tensors.
+
+- **Cropping**:
+  - `crop2d`: Crops a 2D tensor to a specified resolution.
+  - `crop3d`: Crops a 3D tensor to a specified resolution.
+  - `Crop3D`: A module for cropping 3D tensors based on padding values.
+
+- **Patch Embedding and Recovery**:
+  - `PatchEmbed2D`: Converts 2D images into patch embeddings.
+  - `PatchEmbed3D`: Converts 3D images into patch embeddings.
+  - `PatchRecovery2D`: Recovers 2D images from patch embeddings.
+  - `PatchRecovery3D`: Recovers 3D images from patch embeddings.
+
+- **Window Partitioning and Reversal**:
+  - `window_partition`: Partitions tensors into windows.
+  - `window_reverse`: Reverses the window partitioning operation.
+  - `WindowPartition`: A module for partitioning tensors into windows.
+  - `WindowReverse`: A module for reversing window partitioning.
+
+- **Attention Mechanisms**:
+  - `get_shift_window_mask`: Generates a shift window mask for shifted window multi-head self-attention (SW-MSA).
+  - `get_earth_position_index`: Constructs position indices for earth-specific attention.
+
+Dependencies
+------------
+
+- **PyTorch**:
+  Provides the core framework for tensor operations and neural network components.
+
+- **Torch.nn**:
+  Used for defining layers and modules, such as `Linear`, `LayerNorm`, and `Conv2d`.
+
+"""
 
 class UpSample(nn.Module):
     """
