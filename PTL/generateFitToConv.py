@@ -1,3 +1,41 @@
+"""
+generateFitToConv Module
+=========================
+
+This module provides functions for processing SuperDARN radar data, specifically FITACF files, and finding 
+corresponding CONVMAP files. It includes tools for loading radar data, creating file sets based on time ranges 
+and radar coverage, and associating FITACF file sets with their corresponding CONVMAP files.
+
+Key Features
+------------
+
+- **File Loading**:
+  - `load_file`: Loads a FITACF file and extracts radar records.
+
+- **FITACF File Processing**:
+  - `process_fitacf_to_filelists`: Processes FITACF files in a folder to create file sets based on time ranges 
+    and radar coverage.
+
+- **CONVMAP File Association**:
+  - `find_conv_maps_from_filelists`: Finds corresponding CONVMAP files for a list of FITACF file sets.
+
+Dependencies
+------------
+
+- **pydarnio**:
+  Used for reading and processing SuperDARN radar data.
+
+- **pandas**:
+  Provides data manipulation and filtering capabilities for organizing radar data.
+
+- **datetime**:
+  Used for handling time ranges and timestamps.
+
+- **os**:
+  Used for file system operations, such as listing files in a directory.
+
+"""
+
 def load_file(path):
     """
     Loads a file and extracts radar records.

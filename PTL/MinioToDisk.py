@@ -1,3 +1,60 @@
+"""
+MinioToDisk Module
+==================
+
+This module provides functionality for downloading all objects from a MinIO bucket to a local folder. It supports 
+multithreaded downloads for improved performance and ensures that the folder structure of the bucket is preserved 
+locally.
+
+Key Features
+------------
+
+- **MinIO Integration**:
+  - Uses the `Minio` client to interact with MinIO buckets.
+  - Supports authentication using access and secret keys.
+
+- **Multithreaded Downloads**:
+  - Utilizes `ThreadPoolExecutor` for concurrent downloads of objects from the bucket.
+  - Displays progress using the `tqdm` progress bar.
+
+- **Folder Structure Preservation**:
+  - Ensures that the folder structure of the bucket is replicated in the local target folder.
+
+- **Error Handling**:
+  - Handles errors during object downloads and logs issues for debugging.
+
+Dependencies
+------------
+
+- **minio**:
+  Provides the MinIO client for interacting with MinIO buckets.
+
+- **os**:
+  Used for file system operations, such as creating directories and saving files.
+
+- **concurrent.futures**:
+  Enables multithreaded downloads using `ThreadPoolExecutor`.
+
+- **tqdm**:
+  Displays a progress bar for tracking download progress.
+
+Usage
+-----
+
+To download all objects from a MinIO bucket to a local folder, use the `download_minio_bucket_to_folder` function. 
+You can also run the script directly with command-line arguments to specify the MinIO configuration, bucket name, 
+and target folder.
+
+Example Command:
+----------------
+
+.. code-block:: bash
+
+   python MinioToDisk.py --host localhost --port 9000 --access_key minioadmin --secret_key minioadmin \
+                         --bucket mybucket --target_folder /path/to/local/folder
+
+"""
+
 from minio import Minio
 from minio.error import S3Error
 import os

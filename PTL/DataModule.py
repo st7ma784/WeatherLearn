@@ -1,20 +1,51 @@
 """
-This module defines data handling classes and functions for processing SuperDARN radar data.
+DataModule Module
+=================
 
-The module includes classes for loading, processing, and managing datasets from MinIO buckets or disk storage. 
-It supports both flat and grid-based data representations and provides functionality for preprocessing and 
-caching datasets.
+This module defines data handling classes and functions for processing SuperDARN radar data. It provides tools 
+for loading, preprocessing, and managing datasets from MinIO buckets or disk storage. The module supports both 
+flat and grid-based data representations and includes functionality for caching datasets and saving/loading 
+preprocessed data.
 
-Classes:
-    - SuperDARNDatasetFolder: Handles datasets stored on disk.
-    - SuperDARNDataset: Handles datasets stored in MinIO buckets.
-    - DatasetFromMinioBucket: A PyTorch Lightning DataModule for managing data loading and preprocessing.
-    - DatasetFromPresaved: Handles preprocessed datasets saved on disk.
+Key Features
+------------
 
-Functions:
-    - gaussian(x, y, x0, y0, sigma_x, sigma_y): Computes a 2D Gaussian function.
-    - save_dataset_to_disk(DataLoader, path): Saves a dataset to disk in minibatches.
-    - load_dataset_from_disk(path): Loads a dataset from disk.
+- **Dataset Management**:
+  - `SuperDARNDatasetFolder`: Handles datasets stored on disk.
+  - `SuperDARNDataset`: Handles datasets stored in MinIO buckets.
+  - `DatasetFromMinioBucket`: A PyTorch Lightning DataModule for managing data loading and preprocessing.
+  - `DatasetFromPresaved`: Handles preprocessed datasets saved on disk.
+
+- **Preprocessing and Caching**:
+  - Supports preprocessing of radar data into flat or grid-based representations.
+  - Provides functionality for saving datasets to disk and loading them for reuse.
+
+- **Utility Functions**:
+  - `gaussian`: Computes a 2D Gaussian function.
+  - `save_dataset_to_disk`: Saves a dataset to disk in minibatches.
+  - `load_dataset_from_disk`: Loads a dataset from disk.
+
+Dependencies
+------------
+
+- **PyTorch Lightning**:
+  Provides the `LightningDataModule` for managing data loading and preprocessing.
+
+- **MinIO**:
+  Used for interacting with MinIO buckets to load radar data.
+
+- **pydarnio**:
+  A library for reading and processing SuperDARN radar data.
+
+- **NumPy**:
+  Used for numerical operations and data manipulation.
+
+- **Torch**:
+  Provides utilities for creating datasets and DataLoaders.
+
+- **TQDM**:
+  Used for progress tracking during data processing.
+
 """
 
 from pytorch_lightning import LightningDataModule

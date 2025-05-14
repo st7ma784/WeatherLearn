@@ -1,20 +1,48 @@
 """
-This module provides functionality for training machine learning models using PyTorch Lightning.
+Launch Module
+=============
 
-It includes methods for training with different logging tools (e.g., Weights & Biases, Neptune), 
-generating SLURM scripts for HPC environments, and managing hyperparameter optimization trials.
+This module provides functionality for training machine learning models using PyTorch Lightning. It includes 
+methods for training with different logging tools (e.g., Weights & Biases, Neptune), generating SLURM scripts 
+for HPC environments, and managing hyperparameter optimization trials.
 
-Classes:
-    - baseparser: A custom argument parser for hyperparameter optimization.
-    - parser: Extends baseparser to handle Neptune and Weights & Biases trials.
+Key Features
+------------
 
-Functions:
-    - train: Trains a model using PyTorch Lightning.
-    - wandbtrain: Wrapper for training with Weights & Biases logging.
-    - neptunetrain: Wrapper for training with Neptune logging.
-    - SlurmRun: Generates a SLURM script for running experiments on HPC systems.
-    - __get_hopt_params: Converts hyperparameter optimization trials into script parameters.
-    - __should_escape: Determines if a value should be escaped in the command line.
+- **Training**:
+  - `train`: Trains a model using PyTorch Lightning.
+  - `wandbtrain`: Wrapper for training with Weights & Biases logging.
+  - `neptunetrain`: Wrapper for training with Neptune logging.
+
+- **SLURM Integration**:
+  - `SlurmRun`: Generates a SLURM script for running experiments on HPC systems.
+
+- **Hyperparameter Optimization**:
+  - `__get_hopt_params`: Converts hyperparameter optimization trials into script parameters.
+  - `__should_escape`: Determines if a value should be escaped in the command line.
+
+- **Custom Parsers**:
+  - `baseparser`: A custom argument parser for hyperparameter optimization.
+  - `parser`: Extends `baseparser` to handle Neptune and Weights & Biases trials.
+
+Dependencies
+------------
+
+- **PyTorch Lightning**:
+  Provides the framework for model training and logging.
+
+- **Weights & Biases (wandb)**:
+  Used for experiment tracking and logging.
+
+- **Neptune**:
+  Provides logging and experiment tracking for machine learning workflows.
+
+- **SLURM**:
+  Used for job scheduling and resource management on HPC systems.
+
+- **Test Tube**:
+  Provides the `HyperOptArgumentParser` for hyperparameter optimization.
+
 """
 
 from test_tube import HyperOptArgumentParser
@@ -417,6 +445,7 @@ class parser(baseparser):
                 code = "_".join(values)
             trial_list.append(trial)
         return trial_list
+
 
 
 if __name__ == "__main__":
