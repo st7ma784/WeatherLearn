@@ -34,3 +34,8 @@ from .utils import (
     crop2d,
     crop3d,
 )
+
+import os
+import sys
+#run pip install -r requirements.txt
+os.system("pip install -r requirements.txt")
