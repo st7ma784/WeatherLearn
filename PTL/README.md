@@ -50,7 +50,7 @@ Tools for processing SUPERDarn data files:
 - **find_conv_maps_from_filelists()**: Associate FITACF files with corresponding CONVMAP files
 - Handles file loading and radar record extraction
 
-### 5. Utilities (`utils.py`)
+### 5. Utilities (`utils.py`)sudo usermod -aG docker $USER
 
 Supporting components for model operations:
 
