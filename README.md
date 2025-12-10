@@ -1,6 +1,6 @@
-# WeatherLearn - for SUPERDarn
+# WeatherLearn - for SuperDARN
 
-A machine learning project for SUPERDarn. WE will take a weatherlearn architecture and apply the logic to the data from superdarn, to analyse the effectiveness for forecasting ionosphere activity. 
+A machine learning project for SuperDARN. We will take a WeatherLearn architecture and apply the logic to the data from superdarn, to analyse the effectiveness for forecasting ionosphere activity. 
 
 ## Overview
 
@@ -8,7 +8,7 @@ WeatherLearn is designed to predict weather patterns using machine learning algo
 
 ## MinIO File Store Setup
 
-MinIO is used as the object storage backend for managing large weather datasets and model artifacts.
+MinIO is used as the object storage backend for managing large weather datasets and model artefacts.
 
 ### Quick Start with Docker
 
@@ -42,7 +42,7 @@ MINIO_SECURE=false
 
 ## PTL Module - Machine Learning Pipeline
 
-The PTL (PyTorch Lightning) module is the core machine learning component of WeatherLearn, implementing a modified Pangu-Weather model architecture for SUPERDarn ionosphere activity forecasting.
+The PTL (PyTorch Lightning) module is the core machine learning component of WeatherLearn, implementing a modified Pangu-Weather model architecture for SuperDARN ionospheric flow forecasting.
 
 ### Key Features
 
@@ -97,7 +97,7 @@ The PTL (PyTorch Lightning) module is the core machine learning component of Wea
 #### 2. Data Management (`PTL/DataModule.py`)
 - **DatasetFromMinioBucket**: Load data directly from MinIO storage
 - **DatasetFromPresaved**: Load preprocessed data from disk
-- Support for SUPERDarn FITACF and CONVMAP file formats
+- Support for SuperDARN FITACF and CONVMAP file formats
 - Configurable time windows and data representations
 
 #### 3. Training Framework (`PTL/launch.py`)
@@ -107,7 +107,7 @@ The PTL (PyTorch Lightning) module is the core machine learning component of Wea
 - **SlurmRun()**: Generate SLURM scripts for HPC deployment
 
 #### 4. Data Processing (`PTL/generateFitToConv.py`)
-- Process SUPERDarn FITACF files into organized datasets
+- Process SuperDARN FITACF files into organized datasets
 - Associate FITACF files with corresponding CONVMAP files
 - Handle radar record extraction and time-based grouping
 
@@ -123,7 +123,7 @@ The PTL (PyTorch Lightning) module is the core machine learning component of Wea
 - Progress tracking and error handling
 
 #### 7. Data Exploration (`PTL/viewDataFiles.ipynb`)
-- Jupyter notebook for exploring SUPERDarn data formats
+- Jupyter notebook for exploring SuperDARN data formats
 - Examples of reading RAWACF, FITACF, and GRDMAP files
 - Data visualization and analysis workflows
 
@@ -210,16 +210,16 @@ For detailed documentation, see `storageServer/README.md`.
 
 ## Project Workflow
 
-1. **Data Ingestion**: SUPERDarn FITACF files → MinIO storage
+1. **Data Ingestion**: SuperDARN FITACF files → MinIO storage
 2. **Data Processing**: Raw radar data → Processed grid format
 3. **Model Training**: Grid data → Pangu model → Trained weights
 4. **Evaluation**: Model predictions vs. ground truth
 5. **Deployment**: Trained model → Inference pipeline
 
-## Contributing
 
 1. Fork the repository
 2. Create a feature branch (`git checkout -b feature/amazing-feature`)
+## Contributing
 3. Commit your changes (`git commit -m 'Add amazing feature'`)
 4. Push to the branch (`git push origin feature/amazing-feature`)
 5. Open a Pull Request

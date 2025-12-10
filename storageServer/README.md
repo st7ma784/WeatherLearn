@@ -1,6 +1,6 @@
 # Storage Server Module
 
-The Storage Server module provides a distributed MinIO object storage solution for WeatherLearn. It implements a high-availability, scalable storage cluster using Docker containers and NGINX load balancing, designed to handle large volumes of SUPERDarn radar data and machine learning artifacts.
+The Storage Server module provides a distributed MinIO object storage solution for WeatherLearn. It implements a high-availability, scalable storage cluster using Docker containers and NGINX load balancing, designed to handle large volumes of SuperDARN radar data and machine learning artifacts.
 
 ## Overview
 

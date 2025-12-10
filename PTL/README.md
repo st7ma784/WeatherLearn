@@ -1,16 +1,16 @@
 # PTL (PyTorch Lightning) Module
 
-The PTL module is the core machine learning component of WeatherLearn, adapted for SUPERDarn ionosphere activity forecasting. It implements a modified Pangu-Weather model architecture using PyTorch Lightning for efficient training and deployment.
+The PTL module is the core machine learning component of WeatherLearn, adapted for SuperDARN ionosphere activity forecasting. It implements a modified Pangu-Weather model architecture using PyTorch Lightning for efficient training and deployment.
 
 ## Overview
 
-This module provides an end-to-end machine learning pipeline for analyzing SUPERDarn radar data to forecast ionosphere activity. It includes data preprocessing, model training, evaluation, and deployment capabilities with support for High-Performance Computing (HPC) environments.
+This module provides an end-to-end machine learning pipeline for analyzing SuperDARN radar data to forecast ionosphere activity. It includes data preprocessing, model training, evaluation, and deployment capabilities with support for High-Performance Computing (HPC) environments.
 
 ## Key Components
 
 ### 1. Model Architecture (`model.py`)
 
-The core model is based on the Pangu-Weather architecture, adapted for SUPERDarn data:
+The core model is based on the Pangu-Weather architecture, adapted for SuperDARN data:
 
 - **Pangu Model**: PyTorch Lightning implementation with earth-specific attention mechanisms
 - **EarthAttention3D**: 3D window attention with earth position bias for handling geospatial data
@@ -25,7 +25,7 @@ Key features:
 
 ### 2. Data Management (`DataModule.py`)
 
-Handles data loading and preprocessing for SUPERDarn radar data:
+Handles data loading and preprocessing for SuperDARN radar data:
 
 - **DatasetFromMinioBucket**: Loads data directly from MinIO object storage
 - **DatasetFromPresaved**: Loads preprocessed data from disk
@@ -44,7 +44,7 @@ Provides comprehensive training capabilities:
 
 ### 4. Data Processing (`generateFitToConv.py`)
 
-Tools for processing SUPERDarn data files:
+Tools for processing SuperDARJN data files:
 
 - **process_fitacf_to_filelists()**: Process FITACF files into organized datasets
 - **find_conv_maps_from_filelists()**: Associate FITACF files with corresponding CONVMAP files
@@ -71,7 +71,7 @@ Efficient data transfer from MinIO storage:
 
 ### 7. Data Exploration (`viewDataFiles.ipynb`)
 
-Jupyter notebook for exploring SUPERDarn data formats:
+Jupyter notebook for exploring SuperDARN data formats:
 
 - Examples of reading RAWACF, FITACF, and GRDMAP files
 - Data structure visualization
@@ -184,7 +184,7 @@ PTL/
 ├── model.py             # Model definitions (Pangu, attention mechanisms)
 ├── utils.py             # Utility functions and classes
 ├── launch.py            # Training scripts and HPC integration
-├── generateFitToConv.py # SUPERDarn data processing
+├── generateFitToConv.py # SuperDARN data processing
 ├── MinioToDisk.py       # Data transfer utilities
 ├── viewDataFiles.ipynb  # Data exploration notebook
 ├── requirements.txt     # Python dependencies
@@ -194,7 +194,7 @@ PTL/
 
 ## Data Flow
 
-1. **Data Ingestion**: SUPERDarn FITACF files → MinIO bucket
+1. **Data Ingestion**: SuperDARN FITACF files → MinIO bucket
 2. **Data Processing**: FITACF files → Processed grid data
 3. **Training**: Grid data → Pangu model → Predictions
 4. **Evaluation**: Model predictions vs. ground truth
@@ -295,5 +295,5 @@ When modifying the PTL module:
 
 - [PyTorch Lightning Documentation](https://pytorch-lightning.readthedocs.io/)
 - [Pangu-Weather Paper](https://arxiv.org/abs/2211.02556)
-- [SUPERDarn Documentation](https://superdarn.ca/)
+- [SuperDARN Documentation](https://superdarn.ca/)
 - [pydarnio Library](https://github.com/SuperDARN/pydarnio)
