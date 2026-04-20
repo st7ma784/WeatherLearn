@@ -52,6 +52,7 @@ The PTL (PyTorch Lightning) module is the core machine learning component of Wea
 - **HPC Integration**: SLURM support for high-performance computing environments
 - **Experiment Tracking**: Weights & Biases and Neptune integration
 - **Distributed Storage**: MinIO integration for scalable data management
+- **Solar Wind Conditioning**: Optional FiLM-based conditioning on IMF (Bx, By, Bz, Kp, Vx) — model degrades gracefully without it
 
 ### Quick Start with PTL
 
@@ -61,7 +62,17 @@ The PTL (PyTorch Lightning) module is the core machine learning component of Wea
    pip install -r requirements.txt
    ```
 
-2. **Basic training example:**
+2. **Baseline training on cnvmap files (no MinIO required):**
+   ```bash
+   # Preprocess cnvmap → .npy chunks (run once)
+   python run_baseline.py --preprocess --grid_size 120 --max_files 500
+
+   # Train with solar wind FiLM conditioning + W&B logging
+   python run_baseline.py --grid_size 120 --max_files 500 --epochs 20 \
+       --wandb --wandb_project SuperDARN-baseline
+   ```
+
+3. **Basic training example (MinIO backend):**
    ```python
    from PTL.launch import train
    
@@ -79,53 +90,70 @@ The PTL (PyTorch Lightning) module is the core machine learning component of Wea
    train(config, accelerator="gpu", devices=1)
    ```
 
-3. **Training with experiment tracking:**
-   ```python
-   from PTL.launch import wandbtrain
-   
-   wandbtrain(config, project_name="superdarn-forecast")
-   ```
-
 ### PTL Module Components
 
 #### 1. Model Architecture (`PTL/model.py`)
 - **Pangu**: Main PyTorch Lightning model implementation
 - **EarthAttention3D**: 3D window attention with earth position bias
 - **EarthSpecificBlock**: Transformer blocks for atmospheric data
+- **FiLMLayer**: Feature-wise Linear Modulation for solar wind conditioning
 - **DropPath**: Stochastic depth regularization
 
 #### 2. Data Management (`PTL/DataModule.py`)
 - **DatasetFromMinioBucket**: Load data directly from MinIO storage
-- **DatasetFromPresaved**: Load preprocessed data from disk
+- **DatasetFromPresaved**: Load preprocessed data from disk (mmap-backed, memory efficient)
 - Support for SUPERDarn FITACF and CONVMAP file formats
 - Configurable time windows and data representations
 
-#### 3. Training Framework (`PTL/launch.py`)
+#### 3. Baseline Training (`PTL/run_baseline.py`)
+- Two-phase pipeline: preprocess cnvmap files to `.npy` chunks, then train via mmap
+- IMF solar wind extraction and FiLM conditioning (Bx, By, Bz, Kp, Vx)
+- W&B logging with predicted vs actual convection map panels
+
+#### 4. Training Framework (`PTL/launch.py`)
 - **train()**: Basic training with configurable parameters
 - **wandbtrain()**: Training with Weights & Biases logging
 - **neptunetrain()**: Training with Neptune logging
 - **SlurmRun()**: Generate SLURM scripts for HPC deployment
 
-#### 4. Data Processing (`PTL/generateFitToConv.py`)
+#### 5. Data Processing (`PTL/generateFitToConv.py`)
 - Process SUPERDarn FITACF files into organized datasets
 - Associate FITACF files with corresponding CONVMAP files
-- Handle radar record extraction and time-based grouping
 
-#### 5. Utilities (`PTL/utils.py`)
+#### 6. Utilities (`PTL/utils.py`)
 - Patch embedding and recovery operations
 - Up/down sampling for multi-resolution processing
 - Window partitioning for attention mechanisms
-- Earth-specific helper functions
 
-#### 6. Data Transfer (`PTL/MinioToDisk.py`)
-- Efficient multithreaded downloads from MinIO
-- Preserve folder structure during transfer
-- Progress tracking and error handling
+### W&B Diagnostics
 
-#### 7. Data Exploration (`PTL/viewDataFiles.ipynb`)
-- Jupyter notebook for exploring SUPERDarn data formats
-- Examples of reading RAWACF, FITACF, and GRDMAP files
-- Data visualization and analysis workflows
+Diagnostics are logged to Weights & Biases during training/validation.
+
+Configuration flags (from `PTL/launch.py`):
+
+- `--log_diagnostics` (default: `True`)
+- `--diagnostics_interval` (default: `50`)
+- `--log_images_every_n_val_epochs` (default: `1`)
+
+EMA and normalization controls:
+
+- `--use_ema`
+- `--use_ema_eval`
+- `--ema_decay`
+- `--ema_warmup_steps`
+- `--cache_stats`
+
+Interpretation guide:
+
+- See `PTL/DIAGNOSTICS.md` for expected trends, failure signatures, and corrective actions.
+- See `PTL/DIAGNOSTICS.md` section "Recommended W&B Dashboard Layout" for a standard panel setup.
+
+Auto-create the W&B dashboard report:
+
+```bash
+cd PTL
+python setup_wandb_dashboard.py --entity <your-wandb-entity> --project <your-wandb-project>
+```
 
 ### Configuration Parameters
 
@@ -135,6 +163,7 @@ The PTL (PyTorch Lightning) module is the core machine learning component of Wea
 - `window_size`: Attention window size (default: (2, 8, 16))
 - `learning_rate`: Learning rate (default: 1e-4)
 - `grid_size`: Input grid resolution (default: 300)
+- `solar_wind_dim`: IMF feature dimension (default: 0 = disabled)
 
 **Data Parameters:**
 - `batch_size`: Training batch size (default: 16)
@@ -164,13 +193,6 @@ SlurmRun(
     gres="gpu:1"
 )
 ```
-
-### Performance Optimization
-
-- Use mixed precision training (`precision=16`)
-- Enable multiple data loading workers (`num_workers=12`)
-- Use MinIO for distributed storage access
-- Implement gradient checkpointing for large models
 
 For detailed documentation, see `PTL/README.md`.
 
@@ -210,10 +232,10 @@ For detailed documentation, see `storageServer/README.md`.
 
 ## Project Workflow
 
-1. **Data Ingestion**: SUPERDarn FITACF files → MinIO storage
-2. **Data Processing**: Raw radar data → Processed grid format
-3. **Model Training**: Grid data → Pangu model → Trained weights
-4. **Evaluation**: Model predictions vs. ground truth
+1. **Data Ingestion**: SUPERDarn FITACF/CONVMAP files → MinIO storage or local `.npy` cache
+2. **Data Processing**: Raw radar data → Processed grid format (5 channels, configurable resolution)
+3. **Model Training**: Grid data + optional IMF solar wind → Pangu model → Trained weights
+4. **Evaluation**: Model predictions vs. ground truth; persistence and climatology skill scores
 5. **Deployment**: Trained model → Inference pipeline
 
 ## Contributing

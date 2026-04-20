@@ -51,18 +51,19 @@ Dependencies
 
 from pytorch_lightning import LightningDataModule
 from torch.utils.data import DataLoader
-from torchvision import datasets, transforms
 import torch
 from torch.utils.data import IterableDataset, Dataset
 import pydarnio
 import numpy as np
-import datetime
-from minio import Minio
 import os
+try:
+    from minio import Minio
+except ImportError:
+    Minio = None  # optional; only needed for MinIO-backed datasets
 import random
 from tqdm import tqdm
 import hashlib
-import time
+import ast
 
 def gaussian(x, y, x0, y0, sigma_x, sigma_y):
     """
@@ -195,7 +196,7 @@ class SuperDARNDataset(IterableDataset):
         def __iter__():
             for file in self.generator():
                 output = self.process_file(open(os.path.join(data_dir, file), 'rb'))
-                if output[0] is None or output[1] is None:
+                if output is None or output[0] is None or output[1] is None:
                     continue
                 yield output
 
@@ -239,7 +240,10 @@ class SuperDARNDataset(IterableDataset):
         self.grid_size = kwargs.get("grid_size", 300)
         self.time_step = kwargs.get("time_step", 1)
         self.device = "cpu"
+        self.max_retries = kwargs.get("max_retries", 3)
         try:
+            if Minio is None:
+                raise ImportError("minio package not installed")
             self.minioClient = Minio(miniodict.get("host", "localhost") + ":" + str(miniodict.get("port", 9000)),
                                      access_key=miniodict.get("access_key", "minioadmin"),
                                      secret_key=miniodict.get("secret_key", "minioadmin"),
@@ -264,6 +268,78 @@ class SuperDARNDataset(IterableDataset):
                          "min_mlat": 360,
                          "min_mlon": 360}
         self.first_epoch = True
+
+    def _safe_float(self, value):
+        try:
+            return float(value)
+        except Exception:
+            return 0.0
+
+    def _records_to_grid(self, records):
+        if not records:
+            return np.zeros((5, self.grid_size, self.grid_size), dtype=np.float32)
+
+        vel_sum = np.zeros((self.grid_size, self.grid_size), dtype=np.float32)
+        vel_cnt = np.zeros((self.grid_size, self.grid_size), dtype=np.float32)
+        pwr_sum = np.zeros((self.grid_size, self.grid_size), dtype=np.float32)
+        wd_sum = np.zeros((self.grid_size, self.grid_size), dtype=np.float32)
+
+        for record in records:
+            mlats = record.get("vector.mlat", []) or []
+            mlons = record.get("vector.mlon", []) or []
+            vels = record.get("vector.vel.median", []) or []
+            pwrs = record.get("vector.pwr.median", []) or []
+            wids = record.get("vector.wdt.median", []) or []
+            n = min(len(mlats), len(mlons), len(vels))
+            if n == 0:
+                continue
+            for i in range(n):
+                mlat = self._safe_float(mlats[i])
+                mlon = self._safe_float(mlons[i])
+                if not np.isfinite(mlat) or not np.isfinite(mlon):
+                    continue
+                lat_idx = int(np.clip((mlat + 90.0) / 180.0 * (self.grid_size - 1), 0, self.grid_size - 1))
+                lon_idx = int(np.clip((mlon % 360.0) / 360.0 * (self.grid_size - 1), 0, self.grid_size - 1))
+                vel_sum[lat_idx, lon_idx] += self._safe_float(vels[i])
+                vel_cnt[lat_idx, lon_idx] += 1.0
+                if i < len(pwrs):
+                    pwr_sum[lat_idx, lon_idx] += self._safe_float(pwrs[i])
+                if i < len(wids):
+                    wd_sum[lat_idx, lon_idx] += self._safe_float(wids[i])
+
+        mean_vel = np.divide(vel_sum, np.maximum(vel_cnt, 1.0), dtype=np.float32)
+        mean_pwr = np.divide(pwr_sum, np.maximum(vel_cnt, 1.0), dtype=np.float32)
+        mean_wdt = np.divide(wd_sum, np.maximum(vel_cnt, 1.0), dtype=np.float32)
+        occupancy = (vel_cnt > 0).astype(np.float32)
+        density = np.log1p(vel_cnt).astype(np.float32)
+
+        return np.stack([mean_vel, mean_pwr, mean_wdt, occupancy, density], axis=0).astype(np.float32)
+
+    def process_conv_to_grid(self, records):
+        return self._records_to_grid(records)
+
+    def process_fitacf_to_grid(self, records):
+        return self._records_to_grid(records)
+
+    def process_conv_to_flat(self, records):
+        return self.process_conv_to_grid(records).reshape(5, -1)
+
+    def process_fitacf_to_flat(self, records):
+        return self.process_fitacf_to_grid(records).reshape(5, -1)
+
+    def process_data_conv(self, records):
+        if not records:
+            return None
+        if len(records) < 2:
+            grid = self.process_conv_to_grid(records)
+            tensor = torch.from_numpy(grid)
+            return tensor, tensor.clone()
+        split_idx = max(1, len(records) // 2)
+        x_grid = self.process_conv_to_grid(records[:split_idx])
+        y_grid = self.process_conv_to_grid(records[split_idx:])
+        if x_grid is None or y_grid is None:
+            return None
+        return torch.from_numpy(x_grid), torch.from_numpy(y_grid)
 
     def generator(self):
         """
@@ -300,24 +376,17 @@ class SuperDARNDataset(IterableDataset):
         Yields:
             tuple: Processed data.
         """
-        while True:
-            try:
-                obj = next(self.generator())
+        for obj in self.generator():
+            for _ in range(self.max_retries):
                 try:
-                    minioClient = Minio(self.miniodict.get("host", "localhost") + ":" + str(self.miniodict.get("port", 9000)),
-                                        access_key=self.miniodict.get("access_key", "minioadmin"),
-                                        secret_key=self.miniodict.get("secret_key", "minioadmin"),
-                                        secure=False)
-                    data = minioClient.get_object(self.minioBucket, obj.object_name)
+                    data = self.minioClient.get_object(self.minioBucket, obj.object_name)
                     data1 = self.process_file(data)
                     if data1 is None:
-                        continue
+                        break
                     yield data1
+                    break
                 except Exception as e:
-                    print("Error: ", e)
-                    self.minioClient.remove_object(self.minioBucket, obj.object_name)
-            except Exception as e:
-                pass
+                    print("Error processing object {}: {}".format(obj.object_name, e))
 
     def __getitem__(self, index):
         """
@@ -329,7 +398,7 @@ class SuperDARNDataset(IterableDataset):
         Returns:
             tuple: The data at the specified index.
         """
-        return next(self.__iter__())
+        return next(iter(self))
 
 
 class DatasetFromMinioBucket(LightningDataModule):
@@ -355,6 +424,69 @@ class DatasetFromMinioBucket(LightningDataModule):
         method (str): Data representation method ('flat' or 'grid').
         window_size (int): Size of the time window for data processing.
     """
+
+    def __init__(self, minioClient, bucket_name, data_dir, batch_size, method='grid', WindowsMinutes=20, **kwargs):
+        super().__init__()
+        self.minioClient = minioClient
+        self.bucket_name = bucket_name
+        self.data_dir = data_dir
+        self.batch_size = batch_size
+        self.method = method
+        self.window_size = kwargs.get("window_size", WindowsMinutes)
+        self.preProcess = kwargs.get("preProcess", False)
+        self.cache_to_disk = kwargs.get("cache_to_disk", kwargs.get("cache_first", False))
+        self.HPC = kwargs.get("HPC", False)
+        self.cache_stats = kwargs.get("cache_stats", True)
+        self.kwargs = kwargs
+
+        hash_payload = {
+            "bucket_name": bucket_name,
+            "method": method,
+            "window_size": self.window_size,
+            "grid_size": kwargs.get("grid_size", 300),
+            "time_step": kwargs.get("time_step", 1),
+        }
+        self.dataset_hash = hashlib.md5(str(sorted(hash_payload.items())).encode("utf-8")).hexdigest()[:12]
+
+        self.train_dataset = None
+        self.val_dataset = None
+        self.dataset = None
+        self.stats_path = os.path.join(self.data_dir, "data", str(self.dataset_hash), "train_stats.npz")
+
+    def _dataset_for_stage(self):
+        return self.train_dataset if self.train_dataset is not None else self.dataset
+
+    def _subset_indices(self, subset):
+        if isinstance(subset, torch.utils.data.Subset):
+            return np.asarray(subset.indices, dtype=np.int64)
+        return np.arange(len(subset), dtype=np.int64)
+
+    def _load_or_compute_train_stats(self):
+        if not isinstance(self.dataset, DatasetFromPresaved):
+            return
+        if not self.cache_stats:
+            return
+
+        os.makedirs(os.path.dirname(self.stats_path), exist_ok=True)
+        if os.path.exists(self.stats_path):
+            loaded = np.load(self.stats_path)
+            stats = {
+                "x_mean": loaded["x_mean"],
+                "x_std": loaded["x_std"],
+                "y_mean": loaded["y_mean"],
+                "y_std": loaded["y_std"],
+            }
+        else:
+            train_indices = self._subset_indices(self.train_dataset)
+            stats = self.dataset.compute_stats_from_indices(train_indices)
+            np.savez(
+                self.stats_path,
+                x_mean=stats["x_mean"],
+                x_std=stats["x_std"],
+                y_mean=stats["y_mean"],
+                y_std=stats["y_std"],
+            )
+        self.dataset.set_normalization_stats(stats)
 
     def prepare_data(self):
         """
@@ -397,7 +529,21 @@ class DatasetFromMinioBucket(LightningDataModule):
             else:
                 self.dataset = SuperDARNDatasetFolder(self.data_dir, self.batch_size, self.method, self.window_size, **self.kwargs)
 
-        self.train_dataset, self.val_dataset = torch.utils.data.random_split(self.dataset, [int(len(self.dataset) * 0.8), len(self.dataset) - int(len(self.dataset) * 0.8)])
+        if isinstance(self.dataset, IterableDataset):
+            self.train_dataset = self.dataset
+            self.val_dataset = self.dataset
+            return
+
+        dataset_len = len(self.dataset)
+        train_len = int(dataset_len * 0.8)
+        val_len = max(1, dataset_len - train_len)
+        train_len = dataset_len - val_len
+        indices = list(range(dataset_len))
+        self.train_dataset = torch.utils.data.Subset(self.dataset, indices[:train_len])
+        self.val_dataset = torch.utils.data.Subset(self.dataset, indices[train_len:])
+
+        # Fit normalization on training split only to avoid leakage into validation/test.
+        self._load_or_compute_train_stats()
 
     def train_dataloader(self):
         """
@@ -406,7 +552,19 @@ class DatasetFromMinioBucket(LightningDataModule):
         Returns:
             DataLoader: The training DataLoader.
         """
-        return DataLoader(self.train_dataset, batch_size=self.batch_size, shuffle=True, num_workers=12, pin_memory=True, prefetch_factor=3)
+        num_workers = min(12, os.cpu_count() or 1)
+        kwargs = {
+            "batch_size": self.batch_size,
+            "num_workers": num_workers,
+            "pin_memory": True,
+            "persistent_workers": num_workers > 0,
+        }
+        if num_workers > 0:
+            kwargs["prefetch_factor"] = 3
+
+        if isinstance(self.train_dataset, IterableDataset):
+            return DataLoader(self.train_dataset, shuffle=False, **kwargs)
+        return DataLoader(self.train_dataset, shuffle=True, **kwargs)
 
     def val_dataloader(self):
         """
@@ -415,7 +573,15 @@ class DatasetFromMinioBucket(LightningDataModule):
         Returns:
             DataLoader: The validation DataLoader.
         """
-        return DataLoader(self.val_dataset, batch_size=self.batch_size, shuffle=False, num_workers=8, pin_memory=True)
+        num_workers = min(8, os.cpu_count() or 1)
+        return DataLoader(
+            self._dataset_for_stage() if self.val_dataset is None else self.val_dataset,
+            batch_size=self.batch_size,
+            shuffle=False,
+            num_workers=num_workers,
+            pin_memory=True,
+            persistent_workers=num_workers > 0,
+        )
 
     def test_dataloader(self):
         """
@@ -424,7 +590,15 @@ class DatasetFromMinioBucket(LightningDataModule):
         Returns:
             DataLoader: The test DataLoader.
         """
-        return DataLoader(self.val_dataset, batch_size=self.batch_size, shuffle=False, num_workers=4, pin_memory=True)
+        num_workers = min(4, os.cpu_count() or 1)
+        return DataLoader(
+            self._dataset_for_stage() if self.val_dataset is None else self.val_dataset,
+            batch_size=self.batch_size,
+            shuffle=False,
+            num_workers=num_workers,
+            pin_memory=True,
+            persistent_workers=num_workers > 0,
+        )
 
 
 def save_dataset_to_disk(DataLoader, path):
@@ -443,6 +617,7 @@ def save_dataset_to_disk(DataLoader, path):
     tensorA = torch.tensor([])
     tensorB = torch.tensor([])
     tensorshape = None
+    idx = -1
     for idx, i in enumerate(tqdm(DataLoader)):
         dataA, dataB = i
         if dataA is None or dataB is None:
@@ -461,9 +636,12 @@ def save_dataset_to_disk(DataLoader, path):
             tensorshape = tensorA.shape
 
     if tensorA.shape[0] > 0:
-        np.save(os.path.join(path, "dataA_{}.npy".format(idx)), tensorA.numpy())
-        np.save(os.path.join(path, "dataB_{}.npy".format(idx)), tensorB.numpy())
+        final_idx = max(idx, 0)
+        np.save(os.path.join(path, "dataA_{}.npy".format(final_idx)), tensorA.numpy())
+        np.save(os.path.join(path, "dataB_{}.npy".format(final_idx)), tensorB.numpy())
         tensorshape = list([tensorA.shape[i] for i in range(len(tensorA.shape))])
+    if tensorshape is None:
+        return
     tensorshape[0] = -1
     with open(os.path.join(path, "shape.txt"), 'w') as f:
         f.write(str(tensorshape))
@@ -487,10 +665,12 @@ def load_dataset_from_disk(path):
                 dataA.append(os.path.join(root, file))
             elif "dataB" in file:
                 dataB.append(os.path.join(root, file))
+    dataA.sort()
+    dataB.sort()
     shape = None
     try:
         with open(os.path.join(path, "shape.txt"), 'r') as f:
-            shape = eval(f.read())
+            shape = ast.literal_eval(f.read())
             shape[0] = -1
     except Exception as e:
         print("Error: ", e)
@@ -531,7 +711,83 @@ class DatasetFromPresaved(Dataset):
             self.shape = shape[-3:]
         else:
             self.shape = None
-        self.len = len(dataA) * 200
+        self.chunk_sizes = []
+        for file in self.dataA:
+            try:
+                self.chunk_sizes.append(int(np.load(file, mmap_mode='r').shape[0]))
+            except Exception:
+                self.chunk_sizes.append(0)
+        self.cumulative_sizes = np.cumsum(self.chunk_sizes) if self.chunk_sizes else np.array([], dtype=np.int64)
+        self.len = int(self.cumulative_sizes[-1]) if len(self.cumulative_sizes) > 0 else 0
+        self.x_mean = None
+        self.x_std = None
+        self.y_mean = None
+        self.y_std = None
+
+    def set_normalization_stats(self, stats):
+        self.x_mean = torch.tensor(stats["x_mean"], dtype=torch.float32).view(-1, 1, 1)
+        self.x_std = torch.tensor(stats["x_std"], dtype=torch.float32).view(-1, 1, 1)
+        self.y_mean = torch.tensor(stats["y_mean"], dtype=torch.float32).view(-1, 1, 1)
+        self.y_std = torch.tensor(stats["y_std"], dtype=torch.float32).view(-1, 1, 1)
+
+    def compute_stats_from_indices(self, indices):
+        if len(indices) == 0:
+            channels = int(self.shape[0]) if self.shape is not None else 5
+            zeros = np.zeros((channels,), dtype=np.float32)
+            ones = np.ones((channels,), dtype=np.float32)
+            return {"x_mean": zeros, "x_std": ones, "y_mean": zeros, "y_std": ones}
+
+        indices = np.asarray(indices, dtype=np.int64)
+        indices.sort()
+        file_ids = np.searchsorted(self.cumulative_sizes, indices, side='right')
+
+        x_sum = x_sq_sum = y_sum = y_sq_sum = None
+        count = 0
+        eps = 1e-6
+
+        for file_id in np.unique(file_ids):
+            local_mask = file_ids == file_id
+            idxs = indices[local_mask]
+            prev_total = int(self.cumulative_sizes[file_id - 1]) if file_id > 0 else 0
+            local_offsets = idxs - prev_total
+
+            dA = np.load(self.dataA[int(file_id)], mmap_mode='r')
+            dB = np.load(self.dataB[int(file_id)], mmap_mode='r')
+            batchA = np.asarray(dA[local_offsets], dtype=np.float64)
+            batchB = np.asarray(dB[local_offsets], dtype=np.float64)
+
+            if batchA.ndim != 4 or batchB.ndim != 4:
+                continue
+
+            if x_sum is None:
+                x_sum = batchA.sum(axis=(0, 2, 3))
+                x_sq_sum = np.square(batchA).sum(axis=(0, 2, 3))
+                y_sum = batchB.sum(axis=(0, 2, 3))
+                y_sq_sum = np.square(batchB).sum(axis=(0, 2, 3))
+            else:
+                x_sum += batchA.sum(axis=(0, 2, 3))
+                x_sq_sum += np.square(batchA).sum(axis=(0, 2, 3))
+                y_sum += batchB.sum(axis=(0, 2, 3))
+                y_sq_sum += np.square(batchB).sum(axis=(0, 2, 3))
+            count += int(batchA.shape[0] * batchA.shape[2] * batchA.shape[3])
+
+        if count == 0:
+            channels = int(self.shape[0]) if self.shape is not None else 5
+            zeros = np.zeros((channels,), dtype=np.float32)
+            ones = np.ones((channels,), dtype=np.float32)
+            return {"x_mean": zeros, "x_std": ones, "y_mean": zeros, "y_std": ones}
+
+        x_mean = (x_sum / count).astype(np.float32)
+        y_mean = (y_sum / count).astype(np.float32)
+        x_var = np.maximum((x_sq_sum / count) - np.square(x_mean, dtype=np.float32), eps)
+        y_var = np.maximum((y_sq_sum / count) - np.square(y_mean, dtype=np.float32), eps)
+
+        return {
+            "x_mean": x_mean,
+            "x_std": np.sqrt(x_var, dtype=np.float32),
+            "y_mean": y_mean,
+            "y_std": np.sqrt(y_var, dtype=np.float32),
+        }
 
     def __len__(self):
         """
@@ -552,12 +808,15 @@ class DatasetFromPresaved(Dataset):
         Returns:
             tuple: The data at the specified index.
         """
-        file_index = index // 200
-        file_offset = index % 200
+        if self.len <= 0:
+            raise IndexError("Dataset is empty")
+        index = int(index % self.len)
+        file_index = int(np.searchsorted(self.cumulative_sizes, index, side='right'))
+        prev_total = int(self.cumulative_sizes[file_index - 1]) if file_index > 0 else 0
+        file_offset = index - prev_total
         dA = np.load(self.dataA[file_index], mmap_mode='r')
         dB = np.load(self.dataB[file_index], mmap_mode='r')
         if dA.shape[0] <= file_offset or dB.shape[0] <= file_offset:
-            self.len = self.len - 200 + dA.shape[0]
             return self.__getitem__(random.randint(0, self.len - 1))
         try:
             dataA = dA[file_offset, :, :, :]
@@ -573,8 +832,16 @@ class DatasetFromPresaved(Dataset):
         dataB = dataB.reshape(self.shape)
         dataA = torch.tensor(dataA, dtype=torch.float32)
         dataB = torch.tensor(dataB, dtype=torch.float32)
-        dataA = dataA / torch.norm(dataA, dim=[-1, -2], keepdim=True)
-        dataB = dataB / torch.norm(dataB, dim=[-1, -2], keepdim=True)
+        if self.x_mean is not None and self.x_std is not None:
+            dataA = (dataA - self.x_mean) / torch.clamp(self.x_std, min=1e-6)
+        else:
+            eps = 1e-6
+            dataA = dataA / torch.clamp(torch.norm(dataA, dim=[-1, -2], keepdim=True), min=eps)
+        if self.y_mean is not None and self.y_std is not None:
+            dataB = (dataB - self.y_mean) / torch.clamp(self.y_std, min=1e-6)
+        else:
+            eps = 1e-6
+            dataB = dataB / torch.clamp(torch.norm(dataB, dim=[-1, -2], keepdim=True), min=eps)
         return dataA, dataB
 
 if __name__ == "__main__":

@@ -68,8 +68,9 @@ import matplotlib.pyplot as plt
 import os
 from torch import nn
 import numpy as np
-from utils import get_shift_window_mask, WindowReverse, WindowPartition, PatchEmbed2D, PatchEmbed3D, PatchRecovery2D, get_pad3d, DownSample, UpSample, get_earth_position_index, Crop3D
+from utils import get_shift_window_mask, WindowReverse, WindowPartition, PatchEmbed2D, PatchRecovery2D, get_pad3d, DownSample, UpSample, get_earth_position_index, Crop3D
 import math
+import time
 
 
 def norm_cdf(x):
@@ -237,13 +238,9 @@ class DropPath(nn.Module):
     def __init__(self, drop_prob: float = 0., scale_by_keep: bool = True):
         super(DropPath, self).__init__()
         self.drop_prob = drop_prob
-        if drop_prob == 0. or not self.training:
-            self.forward = self.null_forward
         self.scale_by_keep = scale_by_keep
-        scale_factor=1/(1-drop_prob)
-        if 1-drop_prob<=0 or not scale_by_keep:
-            scale_factor=1
-        self.scale_factor=scale_factor
+        keep_prob = 1.0 - drop_prob
+        self.scale_factor = (1.0 / keep_prob) if (keep_prob > 0 and scale_by_keep) else 1.0
 
     def null_forward(self, x):
         """
@@ -267,7 +264,9 @@ class DropPath(nn.Module):
         Returns:
             torch.Tensor: Output tensor with drop path applied.
         """
-        rand_tensor=x.new_empty(x.shape[0],*([1] * (x.ndim - 1))).bernoulli_(1 - self.drop_prob) * self.scale_factor
+        if self.drop_prob == 0.0 or not self.training:
+            return x
+        rand_tensor = x.new_empty(x.shape[0], *([1] * (x.ndim - 1))).bernoulli_(1 - self.drop_prob) * self.scale_factor
         return x * rand_tensor
 
     def extra_repr(self):
@@ -340,14 +339,12 @@ class EarthSpecificBlock(nn.Module):
         
 
         shift_pl, shift_lat, shift_lon = self.shift_size
-        self.roll = shift_pl and shift_lon and shift_lat
-        self.posrollX=self.null_rollX
-        self.negrollX=self.null_rollX
-        attn_mask=None
+        self.roll = bool(shift_pl and shift_lon and shift_lat)
+        self.neg_shifts = (-shift_pl, -shift_lat, -shift_lon) if self.roll else (0, 0, 0)
+        self.pos_shifts = (shift_pl, shift_lat, shift_lon) if self.roll else (0, 0, 0)
+        attn_mask = None
         if self.roll:
-            attn_mask = get_shift_window_mask(pad_resolution, window_size, shift_size)
-            self.posrollX=self.posrollX
-            self.negrollX=self.negrollX
+            attn_mask = get_shift_window_mask(pad_resolution, window_size, self.shift_size)
 
         self.attn = EarthAttention3D(
             dim=dim, input_resolution=pad_resolution, window_size=window_size, num_heads=num_heads, qkv_bias=qkv_bias,
@@ -379,15 +376,50 @@ class EarthSpecificBlock(nn.Module):
         x = self.norm1(x)
         x=x.unflatten(1, self.input_resolution)
         x = self.pad(x.permute(0, 4, 1, 2, 3)).permute(0, 2, 3, 4, 1)
-        x = self.negrollX(x)
+        x = torch.roll(x, shifts=self.neg_shifts, dims=(1, 2, 3))
         shifted_x=self.WindowReverse(self.attn(self.WindowPartition(x)))
-        shifted_x = self.posrollX(shifted_x)
+        shifted_x = torch.roll(shifted_x, shifts=self.pos_shifts, dims=(1, 2, 3))
         shifted_x= self.Crop3d(shifted_x)
         shifted_x = shifted_x.flatten(1, 3)
         shifted_x = shortcut + self.drop_path(shifted_x)
         shifted_x = shifted_x + self.drop_path(self.mlp(self.norm2(shifted_x)))
         return shifted_x
     
+
+
+class FiLMLayer(nn.Module):
+    """
+    Feature-wise Linear Modulation conditioned on a solar-wind scalar vector.
+
+    Projects `solar_dim` scalars → (γ, β) of size `feature_dim` and applies
+        out = (1 + γ * mask) * x + β * mask
+    so mask=0 is an exact identity (model is unchanged when data is absent).
+    """
+
+    def __init__(self, solar_dim: int, feature_dim: int):
+        super().__init__()
+        self.mlp = nn.Sequential(
+            nn.Linear(solar_dim, feature_dim * 2),
+            nn.SiLU(),
+            nn.Linear(feature_dim * 2, feature_dim * 2),
+        )
+        # Initialise to near-zero so conditioning starts as identity
+        nn.init.zeros_(self.mlp[-1].weight)
+        nn.init.zeros_(self.mlp[-1].bias)
+
+    def forward(self, x: torch.Tensor,
+                solar_vec: torch.Tensor,
+                mask: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x:          (B, N, C) token sequence
+            solar_vec:  (B, solar_dim) conditioning scalars
+            mask:       (B, 1) float — 1 if data available, 0 if missing
+        """
+        gamma, beta = self.mlp(solar_vec).chunk(2, dim=-1)   # each (B, C)
+        gamma = gamma.unsqueeze(1) * mask.unsqueeze(-1)       # (B, 1, C)
+        beta  = beta.unsqueeze(1)  * mask.unsqueeze(-1)
+        return x * (1.0 + gamma) + beta
 
 
 class Pangu(pl.LightningModule):
@@ -408,11 +440,27 @@ class Pangu(pl.LightningModule):
         self.learning_rate=learning_rate
         self.time_steps= kwargs.get("time_step", 1)
         drop_path = np.linspace(0, 0.2, 8).tolist()
-        self.criterion= torch.nn.MSELoss(reduction='sum')
-        self.L1Loss = torch.nn.L1Loss()
+        self.criterion = torch.nn.SmoothL1Loss(beta=0.1, reduction='mean')
+        self.metric_mse = torch.nn.MSELoss(reduction='mean')
         self.grid_size=kwargs.get("grid_size",300)
         self.mlp_ratio=kwargs.get("mlp_ratio",4)
         self.noise_factor=kwargs.get("noise_factor",0.1)
+        self.weight_decay = kwargs.get("weight_decay", 0.05)
+        self.use_ema = kwargs.get("use_ema", True)
+        self.use_ema_eval = kwargs.get("use_ema_eval", False)
+        self.ema_decay = float(kwargs.get("ema_decay", 0.999))
+        self.ema_warmup_steps = int(kwargs.get("ema_warmup_steps", 200))
+        self.ema_shadow = {}
+        self._ema_backup = None
+        self.log_diagnostics = kwargs.get("log_diagnostics", True)
+        self.diagnostics_interval = int(kwargs.get("diagnostics_interval", 50))
+        self.log_images_every_n_val_epochs = int(kwargs.get("log_images_every_n_val_epochs", 1))
+        self._batch_start_time = None
+        self._last_grad_norm = None
+        self._last_step_time = None
+        self._last_throughput = None
+        self._lead_time_curve = None
+        self._val_example = None
         self.patchembed2d = PatchEmbed2D(
             img_size=(self.grid_size, self.grid_size),
             patch_size=(4, 4),
@@ -421,7 +469,6 @@ class Pangu(pl.LightningModule):
         )
         reduced_grid=(1, self.grid_size//4,self.grid_size//4)
         self.incremental_step=0
-        self.skip_steps=[]
         self.reduced_grid= (self.grid_size//4,self.grid_size//4)
         further_reduced_grid=(1, self.grid_size//6,self.grid_size//6)
         self.layer1 =  nn.Sequential(*[
@@ -434,11 +481,6 @@ class Pangu(pl.LightningModule):
             for i in range(2)
         ])
 
-        def save_skip(module, input, output):
-            self.skip_steps.append(output)
-
-        self.skiphook = self.layer1.register_forward_hook(save_skip)
-        
         self.downsample = DownSample(in_dim=embed_dim, input_resolution=reduced_grid, output_resolution=further_reduced_grid)
         self.layer2 =nn.Sequential(*[
             EarthSpecificBlock(dim=embed_dim*2, input_resolution=further_reduced_grid, num_heads=num_heads[1], window_size=window_size,
@@ -473,6 +515,289 @@ class Pangu(pl.LightningModule):
         ])
         
         self.patchrecovery2d = PatchRecovery2D((self.grid_size, self.grid_size), (4, 4), (1+self.time_steps) * embed_dim, 5)
+
+        # Place more weight on observed regions/channels that better represent ionospheric structure.
+        self.register_buffer("channel_weights", torch.tensor([1.2, 1.0, 1.0, 1.5, 1.1], dtype=torch.float32))
+
+        # ── Optional FiLM solar-wind conditioning ────────────────────────────
+        # solar_wind_dim=0 disables conditioning entirely (no extra parameters).
+        self.solar_wind_dim = int(kwargs.get("solar_wind_dim", 0))
+        self.solar_wind_dropout = float(kwargs.get("solar_wind_dropout", 0.2))
+        if self.solar_wind_dim > 0:
+            # One FiLM layer per encoder/decoder stage (4 total).
+            # Encoder stages operate on embed_dim; bottleneck on embed_dim*2.
+            self.film_enc  = FiLMLayer(self.solar_wind_dim, embed_dim)
+            self.film_bot  = FiLMLayer(self.solar_wind_dim, embed_dim * 2)
+            self.film_dec  = FiLMLayer(self.solar_wind_dim, embed_dim)
+        else:
+            self.film_enc = self.film_bot = self.film_dec = None
+
+    def _wandb_run(self):
+        if self.logger is None or not hasattr(self.logger, "experiment"):
+            return None
+        return self.logger.experiment
+
+    def _wandb_log(self, payload):
+        run = self._wandb_run()
+        if run is None or not hasattr(run, "log"):
+            return
+        run.log(payload, step=int(self.global_step))
+
+    def _should_log_diag_step(self, batch_idx):
+        return self.log_diagnostics and (self.diagnostics_interval > 0) and (batch_idx % self.diagnostics_interval == 0)
+
+    def on_train_batch_start(self, batch, batch_idx):
+        self._batch_start_time = time.perf_counter()
+
+    def on_after_backward(self):
+        if not self.log_diagnostics:
+            return
+        sq_norm_sum = None
+        for p in self.parameters():
+            if p.grad is None:
+                continue
+            g2 = p.grad.detach().pow(2).sum()
+            sq_norm_sum = g2 if sq_norm_sum is None else (sq_norm_sum + g2)
+        if sq_norm_sum is not None:
+            self._last_grad_norm = torch.sqrt(sq_norm_sum).detach()
+
+    def _ema_named_params(self):
+        for name, param in self.named_parameters():
+            if param.requires_grad and param.dtype.is_floating_point:
+                yield name, param
+
+    def _init_ema(self):
+        if not self.use_ema:
+            return
+        self.ema_shadow = {
+            name: param.detach().clone()
+            for name, param in self._ema_named_params()
+        }
+
+    def _current_ema_decay(self):
+        if self.ema_warmup_steps <= 0:
+            return self.ema_decay
+        warmup_ratio = min(1.0, float(self.global_step + 1) / float(self.ema_warmup_steps))
+        return self.ema_decay * warmup_ratio
+
+    def _update_ema(self):
+        if not self.use_ema:
+            return
+        if not self.ema_shadow:
+            self._init_ema()
+        decay = self._current_ema_decay()
+        one_minus_decay = 1.0 - decay
+        for name, param in self._ema_named_params():
+            self.ema_shadow[name].mul_(decay).add_(param.detach(), alpha=one_minus_decay)
+
+    def _swap_to_ema_weights(self):
+        if not (self.use_ema and self.use_ema_eval and self.ema_shadow):
+            return
+        self._ema_backup = {
+            name: param.detach().clone()
+            for name, param in self._ema_named_params()
+        }
+        for name, param in self._ema_named_params():
+            param.data.copy_(self.ema_shadow[name])
+
+    def _restore_from_ema_weights(self):
+        if self._ema_backup is None:
+            return
+        for name, param in self._ema_named_params():
+            param.data.copy_(self._ema_backup[name])
+        self._ema_backup = None
+
+    def on_train_start(self):
+        self._init_ema()
+
+    def on_train_batch_end(self, outputs, batch, batch_idx):
+        self._update_ema()
+        if self._batch_start_time is not None:
+            self._last_step_time = float(time.perf_counter() - self._batch_start_time)
+            bs = int(batch[0].shape[0]) if isinstance(batch, (tuple, list)) else 0
+            if self._last_step_time > 0 and bs > 0:
+                self._last_throughput = float(bs / self._last_step_time)
+
+        if self._should_log_diag_step(batch_idx):
+            log_payload = {}
+            if self._last_grad_norm is not None:
+                log_payload["diag/grad_norm"] = float(self._last_grad_norm.item())
+            if self._last_step_time is not None:
+                log_payload["diag/step_time_s"] = self._last_step_time
+            if self._last_throughput is not None:
+                log_payload["diag/samples_per_sec"] = self._last_throughput
+            if log_payload:
+                self._wandb_log(log_payload)
+
+    def on_validation_start(self):
+        self._swap_to_ema_weights()
+
+    def on_validation_epoch_start(self):
+        self._val_sse_map = None
+        self._val_count = 0
+        self._val_event_sse = 0.0
+        self._val_event_count = 0.0
+        self._val_quiet_sse = 0.0
+        self._val_quiet_count = 0.0
+        self._val_model_sse = 0.0
+        self._val_baseline_sse = 0.0
+        self._val_baseline_clim_sse = 0.0
+        self._lead_time_curve = None
+        self._val_example = None
+
+    def on_validation_epoch_end(self):
+        # self.log() is only valid here, not in on_validation_end
+        self._log_validation_diagnostics_scalars()
+
+    def on_validation_end(self):
+        self._log_validation_diagnostics_images()
+        self._restore_from_ema_weights()
+
+    def on_test_start(self):
+        self._swap_to_ema_weights()
+
+    def on_test_end(self):
+        self._restore_from_ema_weights()
+
+    # ── visualisation helpers ────────────────────────────────────────────────
+
+    _CH_NAMES  = ["Velocity", "Vel.SD", "Kvect", "Occupancy", "Density"]
+    _CH_CMAPS  = ["RdBu_r",   "viridis", "twilight", "binary",   "plasma"]
+    _CH_UNITS  = ["m/s",       "m/s",    "°",        "",         "log(n)"]
+
+    def _plot_channel_grid(self, x, y, y_hat, title_prefix="val", solar_info=None):
+        """
+        4-row comparison panel per channel:
+          Row 0 — Input (current state)
+          Row 1 — Target (next state, ground truth)
+          Row 2 — Prediction
+          Row 3 — |Error| = |pred − target|
+
+        solar_info: optional dict with IMF scalars to annotate.
+        """
+        n_ch   = x.shape[0]
+        n_rows = 4
+        fig, axes = plt.subplots(n_rows, n_ch,
+                                 figsize=(2.8 * n_ch, 2.8 * n_rows),
+                                 squeeze=False)
+        row_labels = ["Input", "Target", "Prediction", "|Error|"]
+
+        for c in range(n_ch):
+            cmap  = self._CH_CMAPS[c] if c < len(self._CH_CMAPS) else "coolwarm"
+            name  = self._CH_NAMES[c] if c < len(self._CH_NAMES) else f"c{c}"
+            unit  = self._CH_UNITS[c] if c < len(self._CH_UNITS) else ""
+            label = f"{name}" + (f" [{unit}]" if unit else "")
+
+            # shared colour range for input/target/pred
+            vmin = float(np.nanmin([x[c], y[c], y_hat[c]]))
+            vmax = float(np.nanmax([x[c], y[c], y_hat[c]]))
+
+            for row, data in enumerate([x[c], y[c], y_hat[c]]):
+                ax = axes[row, c]
+                im = ax.imshow(data, cmap=cmap, vmin=vmin, vmax=vmax,
+                               interpolation="nearest", origin="lower")
+                ax.set_title(f"{row_labels[row]}\n{label}", fontsize=7)
+                ax.axis("off")
+                if c == n_ch - 1:
+                    fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+
+            # error row
+            err = np.abs(y_hat[c] - y[c])
+            ax_e = axes[3, c]
+            im_e = ax_e.imshow(err, cmap="hot", vmin=0,
+                               vmax=max(float(err.max()), 1e-6),
+                               interpolation="nearest", origin="lower")
+            ax_e.set_title(f"|Error|\n{label}", fontsize=7)
+            ax_e.axis("off")
+            if c == n_ch - 1:
+                fig.colorbar(im_e, ax=ax_e, fraction=0.046, pad=0.04)
+
+        if solar_info:
+            parts = [f"{k}={v:.2f}" for k, v in solar_info.items()]
+            fig.suptitle("IMF: " + "  ".join(parts), fontsize=8, y=1.01)
+
+        plt.tight_layout()
+        return fig
+
+    def _plot_rmse_map(self, rmse_map):
+        channels = rmse_map.shape[0]
+        fig, axes = plt.subplots(1, channels, figsize=(3 * channels, 3),
+                                 squeeze=False)
+        for c in range(channels):
+            name = self._CH_NAMES[c] if c < len(self._CH_NAMES) else f"c{c}"
+            ax   = axes[0, c]
+            im   = ax.imshow(rmse_map[c], cmap="magma", origin="lower")
+            ax.set_title(f"RMSE\n{name}", fontsize=8)
+            ax.axis("off")
+            fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+        plt.tight_layout()
+        return fig
+
+    def _log_validation_diagnostics_scalars(self):
+        """Called from on_validation_epoch_end — self.log() is allowed here."""
+        if not self.log_diagnostics or self._val_count <= 0:
+            return
+
+        rmse_map = torch.sqrt(self._val_sse_map / max(self._val_count, 1)).detach().cpu().float().numpy()
+        self._last_rmse_map = rmse_map  # cache for image logging
+
+        skill_pers = float(1.0 - (self._val_model_sse / max(self._val_baseline_sse, 1e-8)))
+        skill_clim = float(1.0 - (self._val_model_sse / max(self._val_baseline_clim_sse, 1e-8)))
+
+        payload = {
+            "diag/val_skill_persistence": skill_pers,
+            "diag/val_skill_climatology": skill_clim,
+            "diag/val_event_mse":  float(self._val_event_sse  / max(self._val_event_count,  1.0)),
+            "diag/val_quiet_mse":  float(self._val_quiet_sse  / max(self._val_quiet_count,  1.0)),
+        }
+        for c, name in enumerate(self._CH_NAMES):
+            if c < rmse_map.shape[0]:
+                payload[f"diag/val_rmse_{name.lower().replace('.','_')}"] = float(rmse_map[c].mean())
+
+        self._wandb_log(payload)
+        self.log("val_skill_persistence", skill_pers, on_epoch=True)
+        self.log("val_skill_climatology", skill_clim, on_epoch=True)
+
+    def _log_validation_diagnostics_images(self):
+        """Called from on_validation_end — image/table logging to W&B experiment directly."""
+        if not self.log_diagnostics or self._val_count <= 0:
+            return
+
+        run = self._wandb_run()
+        if run is None:
+            return
+
+        try:
+            import wandb
+        except Exception:
+            return
+
+        rmse_map = getattr(self, "_last_rmse_map", None)
+        if rmse_map is None:
+            return
+
+        if (self.current_epoch % max(self.log_images_every_n_val_epochs, 1)) == 0:
+            rmse_fig = self._plot_rmse_map(rmse_map)
+            self._wandb_log({"diag/val_rmse_map": wandb.Image(rmse_fig)})
+            plt.close(rmse_fig)
+
+            if self._val_example is not None:
+                ex_x, ex_y, ex_yhat, ex_res, ex_solar = self._val_example
+                panel_fig = self._plot_channel_grid(
+                    ex_x, ex_y, ex_yhat,
+                    title_prefix=f"epoch {self.current_epoch}",
+                    solar_info=ex_solar,
+                )
+                self._wandb_log({"diag/val_example_panel": wandb.Image(panel_fig)})
+                plt.close(panel_fig)
+
+                self._wandb_log({"diag/val_residual_hist": wandb.Histogram(ex_res.reshape(-1))})
+
+            if self._lead_time_curve is not None:
+                lead_table = wandb.Table(columns=["horizon", "mse"])
+                for h, mse in self._lead_time_curve:
+                    lead_table.add_data(int(h), float(mse))
+                self._wandb_log({"diag/val_lead_time_table": lead_table})
         
     def forward(self, x):
         """
@@ -484,15 +809,93 @@ class Pangu(pl.LightningModule):
         Returns:
             torch.Tensor: Output tensor.
         """
-        x = self.layer1(x)
-        x = self.downsample(x)
+        layer1_out = self.layer1(x)
+        x = self.downsample(layer1_out)
         x = self.layer2(x)
         x = self.layer3(x)
         x = self.upsample(x)
         x = self.layer4(x)
-        return x
+        return x, layer1_out
 
-    
+    def _apply_film(self, x, film_layer, solar_vec, solar_mask):
+        """Apply a FiLM layer if solar conditioning is active, else pass through."""
+        if film_layer is None or solar_vec is None:
+            return x
+        return film_layer(x, solar_vec, solar_mask)
+
+    def _forward_with_solar(self, x, solar_vec=None, solar_mask=None):
+        """Full encoder-decoder pass with optional FiLM conditioning."""
+        layer1_out = self.layer1(x)
+        layer1_out = self._apply_film(layer1_out, self.film_enc, solar_vec, solar_mask)
+
+        x = self.downsample(layer1_out)
+        x = self.layer2(x)
+        x = self._apply_film(x, self.film_bot, solar_vec, solar_mask)
+        x = self.layer3(x)
+        x = self._apply_film(x, self.film_bot, solar_vec, solar_mask)
+
+        x = self.upsample(x)
+        x = self.layer4(x)
+        x = self._apply_film(x, self.film_dec, solar_vec, solar_mask)
+        return x, layer1_out
+
+    def _forecast_latent(self, x, add_noise=False, solar_vec=None, solar_mask=None):
+        if self.time_steps <= 0:
+            return x
+
+        b, n, c = x.shape
+        skip_stack = x.new_empty((self.time_steps, b, n, c))
+
+        for t in range(self.time_steps):
+            inp = x + (torch.randn_like(x) * self.noise_factor) if (add_noise and self.noise_factor > 0) else x
+            x, skip = self._forward_with_solar(inp, solar_vec, solar_mask)
+            skip_stack[t] = skip
+
+        skip_cat = skip_stack.permute(1, 2, 0, 3).reshape(b, n, self.time_steps * c)
+        return torch.cat((x, skip_cat), dim=-1)
+
+    def _decode_from_latent(self, latent):
+        decoded = latent.transpose(1, 2).unflatten(2, self.reduced_grid)
+        return self.patchrecovery2d(decoded)
+
+    def _lead_time_mse_curve(self, x_emb, y, solar_vec=None, solar_mask=None):
+        if self.time_steps <= 1:
+            lat = self._forecast_latent(x_emb, add_noise=False, solar_vec=solar_vec, solar_mask=solar_mask)
+            return [(1, float(self.metric_mse(self._decode_from_latent(lat), y).item()))]
+
+        curve = []
+        for h in range(1, min(self.time_steps, 6) + 1):
+            old_steps = self.time_steps
+            self.time_steps = h
+            with torch.no_grad():
+                lat  = self._forecast_latent(x_emb, add_noise=False, solar_vec=solar_vec, solar_mask=solar_mask)
+                pred = self._decode_from_latent(lat)
+                mse  = self.metric_mse(pred, y)
+            self.time_steps = old_steps
+            curve.append((h, float(mse.item())))
+        return curve
+
+    def _weighted_loss(self, y_hat, y):
+        # Weighted Huber improves stability while emphasizing high-value channels and observed regions.
+        error = F.smooth_l1_loss(y_hat, y, reduction='none', beta=0.1)
+        channel_weights = self.channel_weights.view(1, -1, 1, 1).to(y_hat.device)
+        obs_weight = 1.0 + y[:, 3:4].abs()  # occupancy-like channel
+        spatial_weights = channel_weights.expand_as(error).clone()
+        spatial_weights[:, 3:4] = channel_weights[:, 3:4] * obs_weight
+        return (error * spatial_weights).mean()
+
+    def _unpack_solar(self, batch):
+        """
+        Extract solar wind vector and availability mask from a batch.
+        Batch may be (x, y) or (x, solar_vec, solar_mask, y).
+        Returns (solar_vec, solar_mask) or (None, None) if not present.
+        """
+        if len(batch) == 4:
+            solar_vec  = batch[1].float()   # (x, solar_vec, solar_mask, y)
+            solar_mask = batch[2].float()
+            return solar_vec, solar_mask
+        return None, None
+
     def training_step(self, batch, batch_idx):
         """
         Training step for the model.
@@ -504,21 +907,35 @@ class Pangu(pl.LightningModule):
         Returns:
             torch.Tensor: Training loss.
         """
-        x, y = batch
-        self.skip_steps=[]
-
+        solar_vec, solar_mask = self._unpack_solar(batch)
+        x, y = batch[0], batch[-1]
+        # Random dropout of solar conditioning during training
+        if solar_mask is not None and self.solar_wind_dropout > 0 and self.training:
+            drop = (torch.rand(solar_mask.shape[0], device=solar_mask.device)
+                    < self.solar_wind_dropout).float().unsqueeze(1)
+            solar_mask = solar_mask * (1.0 - drop)
         x = self.patchembed2d(x)
         x = x.flatten(2,3).transpose(1, 2)
-        for t in range(self.time_steps):
-            x=x+(torch.randn_like(x)*self.noise_factor)
-            x = self(x)
-            x=x-(torch.randn_like(x)*self.noise_factor)
+        x = self._forecast_latent(x, add_noise=True, solar_vec=solar_vec, solar_mask=solar_mask)
+        x = self._decode_from_latent(x)
+        loss = self._weighted_loss(x, y)
+        mse = self.metric_mse(x, y)
+        self.log('train_loss', loss, on_epoch=True, prog_bar=True)
+        self.log('train_mse', mse, on_epoch=True, prog_bar=False)
 
-        x=torch.concat([x, *self.skip_steps], dim=-1)
-        x = x.transpose(1, 2).unflatten(2,self.reduced_grid)
-        x = self.patchrecovery2d(x)
-        loss = self.criterion(x, y)
-        self.log('train_loss', loss, on_epoch=True,prog_bar=True)
+        if self._should_log_diag_step(batch_idx):
+            pred_mean = x.detach().mean(dim=(0, 2, 3))
+            pred_std = x.detach().std(dim=(0, 2, 3), unbiased=False)
+            target_mean = y.detach().mean(dim=(0, 2, 3))
+            target_std = y.detach().std(dim=(0, 2, 3), unbiased=False)
+            payload = {}
+            for c in range(x.shape[1]):
+                payload[f"diag/train_pred_mean_c{c}"] = float(pred_mean[c].item())
+                payload[f"diag/train_pred_std_c{c}"] = float(pred_std[c].item())
+                payload[f"diag/train_target_mean_c{c}"] = float(target_mean[c].item())
+                payload[f"diag/train_target_std_c{c}"] = float(target_std[c].item())
+            self._wandb_log(payload)
+
         return loss
 
     def validation_step(self, batch, batch_idx):
@@ -532,38 +949,76 @@ class Pangu(pl.LightningModule):
         Returns:
             torch.Tensor: Validation loss.
         """
-        self.skip_steps=[]
-
-        x, y = batch
+        solar_vec, solar_mask = self._unpack_solar(batch)
+        x, y = batch[0], batch[-1]
+        x_in = x
         x = self.patchembed2d(x)
         x = x.flatten(2,3).transpose(1, 2)
-        for t in range(self.time_steps):
-            x = self(x)
-        x = torch.concat([x, *self.skip_steps], dim=-1)
-        x = x.transpose(1, 2).unflatten(2,self.reduced_grid)
+        latent = self._forecast_latent(x, add_noise=False, solar_vec=solar_vec, solar_mask=solar_mask)
+        y_hat = self._decode_from_latent(latent)
+        loss = self._weighted_loss(y_hat, y)
+        mse = self.metric_mse(y_hat, y)
 
-        y_hat = self.patchrecovery2d(x)
-        loss = self.criterion(y_hat, y)
-        if batch_idx % 100 == 0:
-            self.plot_and_log_data(x, y, y_hat, batch_idx)
-        self.log('val_loss', loss, on_epoch=True,prog_bar=True)
+        sq_err = (y_hat.detach() - y.detach()).pow(2)
+        if self._val_sse_map is None:
+            self._val_sse_map = sq_err.sum(dim=0)
+        else:
+            self._val_sse_map += sq_err.sum(dim=0)
+        self._val_count += int(y.shape[0])
+
+        occ_mask = (y[:, 3:4].abs() > 0.05).expand_as(sq_err)
+        quiet_mask = ~occ_mask
+        self._val_event_sse += float((sq_err * occ_mask).sum().item())
+        self._val_event_count += float(occ_mask.sum().item())
+        self._val_quiet_sse += float((sq_err * quiet_mask).sum().item())
+        self._val_quiet_count += float(quiet_mask.sum().item())
+
+        model_sse = float(sq_err.sum().item())
+        baseline_sse = float((x_in.detach() - y.detach()).pow(2).sum().item())
+        baseline_clim_sse = float(y.detach().pow(2).sum().item())
+        self._val_model_sse += model_sse
+        self._val_baseline_sse += baseline_sse
+        self._val_baseline_clim_sse += baseline_clim_sse
+
+        if batch_idx == 0:
+            ex_x    = x_in[0].detach().cpu().float().numpy()
+            ex_y    = y[0].detach().cpu().float().numpy()
+            ex_yhat = y_hat[0].detach().cpu().float().numpy()
+            ex_res  = (y_hat[0] - y[0]).detach().cpu().float().numpy()
+            # Build a human-readable IMF annotation if solar data is present
+            ex_solar = None
+            if solar_vec is not None:
+                sv = solar_vec[0].detach().cpu().tolist()
+                keys = ["Bx", "By", "Bz", "Kp", "Vx"][:len(sv)]
+                ex_solar = dict(zip(keys, sv))
+            self._val_example = (ex_x, ex_y, ex_yhat, ex_res, ex_solar)
+            if self.log_diagnostics:
+                self._lead_time_curve = self._lead_time_mse_curve(
+                    x, y, solar_vec=solar_vec, solar_mask=solar_mask)
+        self.log('val_loss', loss, on_epoch=True, prog_bar=True)
+        self.log('val_mse', mse, on_epoch=True, prog_bar=True)
         return loss
 
     def plot_and_log_data(self, x, y, y_hat, batch_idx):
-        Batch_size= x.shape[0]
-        x=x.cpu().detach().numpy()
-        y=y.cpu().detach().numpy()
-        y_hat=y_hat.cpu().detach().numpy()
+        batch_size = x.shape[0]
+        x = x.cpu().detach().numpy()
+        y = y.cpu().detach().numpy()
+        y_hat = y_hat.cpu().detach().numpy()
         os.makedirs(f"results/{batch_idx}", exist_ok=True)
-        for item in range(Batch_size):
-            ax, fig = plt.subplots(3, 5)
+        for item in range(batch_size):
+            fig, ax = plt.subplots(3, 5, figsize=(14, 8))
             for i in range(5):
-                fig[0,i].imshow(x[item,i,:,:])
-                fig[1,i].imshow(y[item,i,:,:])
-                fig[2,i].imshow(y_hat[item,i,:,:])
+                ax[0, i].imshow(x[item, i, :, :])
+                ax[0, i].axis("off")
+                ax[1, i].imshow(y[item, i, :, :])
+                ax[1, i].axis("off")
+                ax[2, i].imshow(y_hat[item, i, :, :])
+                ax[2, i].axis("off")
+            plt.tight_layout()
             plt.savefig(f"results/{batch_idx}/{item}.png")
             plt.close()
-        self.logger.log_image("examples",[f"results/{batch_idx}/{item}.png" for item in range(Batch_size)])     
+        if self.logger is not None and hasattr(self.logger, "log_image"):
+            self.logger.log_image("examples", [f"results/{batch_idx}/{item}.png" for item in range(batch_size)])
 
     def test_step(self, batch, batch_idx):
         """
@@ -576,15 +1031,16 @@ class Pangu(pl.LightningModule):
         Returns:
             torch.Tensor: Test loss.
         """
-        self.skip_steps=[]
-
         x, y = batch
-        for t in range(self.time_steps):
-            x = self(x)
-        y_hat = torch.concat([x, *self.skip_steps], dim=-1) 
+        x = self.patchembed2d(x)
+        x = x.flatten(2, 3).transpose(1, 2)
+        y_hat = self._forecast_latent(x, add_noise=False)
         y_hat = y_hat.transpose(1, 2).unflatten(2,self.reduced_grid)
         y_hat = self.patchrecovery2d(y_hat)
-        loss=F.cross_entropy_loss(y_hat, y)
+        loss = self._weighted_loss(y_hat, y)
+        mse = self.metric_mse(y_hat, y)
+        self.log('test_loss', loss, on_epoch=True, prog_bar=True)
+        self.log('test_mse', mse, on_epoch=True, prog_bar=True)
         return loss
 
     def configure_optimizers(self):
@@ -594,5 +1050,15 @@ class Pangu(pl.LightningModule):
         Returns:
             torch.optim.Optimizer: Configured optimizer.
         """
-        optimizer = torch.optim.Adam(self.parameters(), lr=self.learning_rate, betas=(0.9, 0.999), eps=1e-08, weight_decay=0.05)
-        return optimizer
+        optimizer = torch.optim.AdamW(self.parameters(), lr=self.learning_rate, betas=(0.9, 0.999), eps=1e-08,
+                                      weight_decay=self.weight_decay)
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode='min', factor=0.5, patience=5
+        )
+        return {
+            "optimizer": optimizer,
+            "lr_scheduler": {
+                "scheduler": scheduler,
+                "monitor": "val_loss",
+            },
+        }

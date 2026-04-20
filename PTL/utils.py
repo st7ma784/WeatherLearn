@@ -1,5 +1,18 @@
 import torch
 from torch import nn
+
+
+class Permute(nn.Module):
+    """Module wrapper around tensor.permute for use in nn.Sequential."""
+
+    def __init__(self, *dims):
+        super().__init__()
+        self.dims = dims
+
+    def forward(self, x: torch.Tensor):
+        return x.permute(*self.dims)
+
+
 """
 Utils Module
 ============
@@ -238,11 +251,14 @@ class Crop3D(nn.Module):
         Returns:
             torch.Tensor: Cropped tensor.
         """
+        end_pl = -self.padding_back if self.padding_back > 0 else None
+        end_lat = -self.padding_bottom if self.padding_bottom > 0 else None
+        end_lon = -self.padding_right if self.padding_right > 0 else None
         return x[:,
-                self.padding_front:,
-                self.padding_top: -self.padding_bottom,
-                self.padding_left: -self.padding_right,
-                :]
+            self.padding_front:end_pl,
+            self.padding_top:end_lat,
+            self.padding_left:end_lon,
+            :]
 
 
 def get_pad3d(input_resolution, window_size):
@@ -313,16 +329,16 @@ class PatchEmbed2D(nn.Module):
         super().__init__()
         self.img_size = img_size
         height, width = img_size
-        h_patch_size, w_path_size = patch_size
+        h_patch_size, w_patch_size = patch_size
         padding_left = padding_right = padding_top = padding_bottom = 0
         h_remainder = height % h_patch_size
-        w_remainder = width % w_path_size
+        w_remainder = width % w_patch_size
         if h_remainder:
             h_pad = h_patch_size - h_remainder
             padding_top = h_pad // 2
             padding_bottom = int(h_pad - padding_top)
         if w_remainder:
-            w_pad = w_path_size - w_remainder
+            w_pad = w_patch_size - w_remainder
             padding_left = w_pad // 2
             padding_right = int(w_pad - padding_left)
 
@@ -330,9 +346,9 @@ class PatchEmbed2D(nn.Module):
                      nn.Conv2d(in_chans, embed_dim, kernel_size=patch_size, stride=patch_size)
                      ]
         if norm_layer is not None:
-            layerlist.append(torch.nn.permute(0, 2, 3, 1))
+            layerlist.append(Permute(0, 2, 3, 1))
             layerlist.append(norm_layer(embed_dim))
-            layerlist.append(torch.nn.permute(0, 3, 1, 2))
+            layerlist.append(Permute(0, 3, 1, 2))
         self.model = nn.Sequential(*layerlist)
 
     def forward(self, x: torch.Tensor):
@@ -368,7 +384,7 @@ class PatchEmbed3D(nn.Module):
         padding_left = padding_right = padding_top = padding_bottom = padding_front = padding_back = 0
 
         l_remainder = level % l_patch_size
-        h_remainder = height % l_patch_size
+        h_remainder = height % h_patch_size
         w_remainder = width % w_patch_size
 
         if l_remainder:
@@ -391,9 +407,9 @@ class PatchEmbed3D(nn.Module):
         layerlist = [self.pad, self.proj]
 
         if norm_layer is not None:
-            layerlist.append(torch.nn.permute(0, 2, 3, 4, 1))
+            layerlist.append(Permute(0, 2, 3, 4, 1))
             layerlist.append(norm_layer(embed_dim))
-            layerlist.append(torch.nn.permute(0, 4, 1, 2, 3))
+            layerlist.append(Permute(0, 4, 1, 2, 3))
         self.model = nn.Sequential(*layerlist)
 
     def forward(self, x: torch.Tensor):

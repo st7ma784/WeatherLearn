@@ -249,10 +249,10 @@ def SlurmRun(trialconfig):
                              'export CONDADIR=/storage/hpc/46/manders3/conda4/open-ce',
                              'export NCCL_SOCKET_IFNAME=enp0s31f6', ])
     sub_commands.extend(['#SBATCH --{}={}\n'.format(cmd, value) for (cmd, value) in slurm_commands.items()])
+    wandb_key = os.getenv("WANDB_API_KEY", "")
     sub_commands.extend([
         'export SLURM_NNODES=$SLURM_JOB_NUM_NODES',
-        'export wandb=9cf7e97e2460c18a89429deed624ec1cbfb537bc',
-        'export WANDB_API_KEY=9cf7e97e2460c18a89429deed624ec1cbfb537bc',
+        f'export WANDB_API_KEY={wandb_key}',
 
         'source /etc/profile',
         'module add opence',
@@ -345,6 +345,14 @@ class baseparser(HyperOptArgumentParser):
         self.opt_list("--cache_first", type=bool, default=True, tunable=False)
         self.opt_list("--mlp_ratio", type=int, default=2, options=[2, 3, 4], tunable=True)
         self.opt_list("--noise_factor", type=float, default=0.1, options=[0.0, 0.01, 0.05, 0.1, 0.2, 0.005], tunable=True)
+        self.opt_list("--use_ema", type=bool, default=True, tunable=False)
+        self.opt_list("--use_ema_eval", type=bool, default=False, tunable=False)
+        self.opt_list("--ema_decay", type=float, default=0.999, tunable=False)
+        self.opt_list("--ema_warmup_steps", type=int, default=200, tunable=False)
+        self.opt_list("--cache_stats", type=bool, default=True, tunable=False)
+        self.opt_list("--log_diagnostics", type=bool, default=True, tunable=False)
+        self.opt_list("--diagnostics_interval", type=int, default=50, tunable=False)
+        self.opt_list("--log_images_every_n_val_epochs", type=int, default=1, tunable=False)
         self.opt_list("--precision", default='16-mixed', options=[16], tunable=False)
         self.opt_list("--accelerator", default='auto', type=str, options=['gpu'], tunable=False)
         self.opt_list("--num_trials", default=0, type=int, tunable=False)

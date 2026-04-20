@@ -35,6 +35,12 @@ Dependencies
 
 """
 
+import datetime
+import os
+
+import pandas as pd
+import pydarnio
+
 def load_file(path):
     """
     Loads a file and extracts radar records.
@@ -46,7 +52,8 @@ def load_file(path):
         list: A list of radar records extracted from the file.
     """
     # Load the file and get the start and end times
-    reader = pydarnio.SDarnRead(path)
+    with open(path, "rb") as f:
+        reader = pydarnio.SDarnRead(f.read(), True)
     records = reader.read_fitacf()
     return records
 
@@ -61,11 +68,12 @@ def process_fitacf_to_filelists(folder):
     Returns:
         list: A list of file sets, each containing time ranges and associated radar files.
     """
-    dataframe = pd.DataFrame(columns=["start_time", "end_time", "radar", "filename"])
+    rows = []
 
     # Step 2: Go through the folder and create entries in the dataframe
     for file in os.listdir(folder):
-        records = load_file(file)
+        file_path = os.path.join(folder, file)
+        records = load_file(file_path)
         radar_name = file.split("/")[-1].split(".")[-2]
         times = [
             (
@@ -74,11 +82,16 @@ def process_fitacf_to_filelists(folder):
             )
             for record in records if "start.year" in record and "end.year" in record
         ]
+        if len(times) == 0:
+            continue
         startTimes, endTimes = zip(*times)
         minStartTime = min(startTimes)
         maxEndTime = max(endTimes)
-        entry = {"start_time": minStartTime, "end_time": maxEndTime, "radar": radar_name, "filename": file}
-        dataframe = dataframe.append(entry, ignore_index=True)
+        rows.append({"start_time": minStartTime, "end_time": maxEndTime, "radar": radar_name, "filename": file_path})
+
+    dataframe = pd.DataFrame(rows, columns=["start_time", "end_time", "radar", "filename"])
+    if dataframe.empty:
+        return []
 
     # Step 3: Create a list of time ranges
     radar_names = set(dataframe["radar"].unique().tolist())
@@ -114,11 +127,12 @@ def find_conv_maps_from_filelists(folder, file_sets):
             - files_to_process (list): A list of file sets with associated CONVMAP files.
             - file_sets (list): The original file sets with updated CONVMAP file information.
     """
-    dataframe = pd.DataFrame(columns=["start_time", "end_time", "filename"])
+    rows = []
 
     # Step 2: Go through the folder and create entries in the dataframe
     for file in os.listdir(folder):
-        records = load_file(file)
+        file_path = os.path.join(folder, file)
+        records = load_file(file_path)
         times = [
             (
                 datetime.datetime(record["start.year"], record["start.month"], record["start.day"], record["start.hour"], record["start.minute"]),
@@ -126,11 +140,16 @@ def find_conv_maps_from_filelists(folder, file_sets):
             )
             for record in records if "start.year" in record and "end.year" in record
         ]
+        if len(times) == 0:
+            continue
         startTimes, endTimes = zip(*times)
         minStartTime = min(startTimes)
         maxEndTime = max(endTimes)
-        entry = {"start_time": minStartTime, "end_time": maxEndTime, "filename": file}
-        dataframe = dataframe.append(entry, ignore_index=True)
+        rows.append({"start_time": minStartTime, "end_time": maxEndTime, "filename": file_path})
+
+    dataframe = pd.DataFrame(rows, columns=["start_time", "end_time", "filename"])
+    if dataframe.empty:
+        return [], file_sets
 
     # Step 3: For each file set, update with the CONVMAP file name
     files_to_process = []
