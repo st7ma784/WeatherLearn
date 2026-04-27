@@ -206,24 +206,36 @@ class EarthAttention3D(nn.Module):
             torch.Tensor: Output tensor after applying attention.
         """
         B_, nW_, N, C = x.shape
-        qkv = self.qkv(x)
-        qkv=qkv.unflatten(3,( 3, self.num_heads, C // self.num_heads))
-        qkv=qkv.permute(3, 0, 4, 1, 2, 5)
-        q, k, v = qkv[0], qkv[1], qkv[2]
+        hd = C // self.num_heads
+        Bn = B_ * nW_
 
-        q = q * self.scale
-        attn = (q @ k.transpose(-2, -1))
+        # QKV: (B_, nW_, N, 3, nH, hd) → (3, B_, nH, nW_, N, hd) → unbind
+        qkv = self.qkv(x).unflatten(-1, (3, self.num_heads, hd)).permute(3, 0, 4, 1, 2, 5)
+        q, k, v = qkv.unbind(0)  # (B_, nH, nW_, N, hd)
 
-          # nH, num_pl*num_lat, Wpl*Wlat*Wlon, Wpl*Wlat*Wlon
-        attn = attn + self.earth_position_bias
-        attn=self.forward_WMask(attn,B_, nW_, N)
-        attn = self.softmax(attn)
-        attn = self.attn_drop(attn)
-        attn = (attn @ v).permute(0, 2, 3, 1, 4)
-        attn=attn.flatten(-2,-1)
-        attn = self.proj(attn)
-        attn = self.proj_drop(attn)
-        return attn
+        # Build additive bias. earth_position_bias: (1, nH, nW_, N, N).
+        # Expand over B_, apply optional shift mask, then permute nW_ adjacent
+        # to B_ so the reshape to (Bn, nH, N, N) is contiguous-safe.
+        bias = self.forward_WMask(
+            self.earth_position_bias.expand(B_, -1, -1, -1, -1), B_, nW_, N
+        )                                                           # (B_, nH, nW_, N, N)
+        bias = bias.permute(0, 2, 1, 3, 4).reshape(Bn, self.num_heads, N, N)
+
+        q = q.permute(0, 2, 1, 3, 4).reshape(Bn, self.num_heads, N, hd)
+        k = k.permute(0, 2, 1, 3, 4).reshape(Bn, self.num_heads, N, hd)
+        v = v.permute(0, 2, 1, 3, 4).reshape(Bn, self.num_heads, N, hd)
+
+        # mem_efficient / Flash-Attention-2 backend: never stores the N² matrix.
+        out = F.scaled_dot_product_attention(
+            q, k, v,
+            attn_mask=bias,
+            dropout_p=self.attn_drop.p if self.training else 0.0,
+            scale=self.scale,
+        )  # (Bn, nH, N, hd)
+
+        # (Bn, nH, N, hd) → (B_, nW_, N, C)
+        out = out.permute(0, 2, 1, 3).reshape(B_, nW_, N, C)
+        return self.proj_drop(self.proj(out))
 
 
 class DropPath(nn.Module):
@@ -238,33 +250,11 @@ class DropPath(nn.Module):
     def __init__(self, drop_prob: float = 0., scale_by_keep: bool = True):
         super(DropPath, self).__init__()
         self.drop_prob = drop_prob
-        self.scale_by_keep = scale_by_keep
         keep_prob = 1.0 - drop_prob
         self.scale_factor = (1.0 / keep_prob) if (keep_prob > 0 and scale_by_keep) else 1.0
 
-    def null_forward(self, x):
-        """
-        Forward pass without applying drop path.
-
-        Args:
-            x (torch.Tensor): Input tensor.
-
-        Returns:
-            torch.Tensor: Output tensor.
-        """
-        return x
-
     def forward(self, x):
-        """
-        Forward pass with drop path applied.
-
-        Args:
-            x (torch.Tensor): Input tensor.
-
-        Returns:
-            torch.Tensor: Output tensor with drop path applied.
-        """
-        if self.drop_prob == 0.0 or not self.training:
+        if not self.training or self.drop_prob == 0.0:
             return x
         rand_tensor = x.new_empty(x.shape[0], *([1] * (x.ndim - 1))).bernoulli_(1 - self.drop_prob) * self.scale_factor
         return x * rand_tensor
@@ -314,7 +304,9 @@ class EarthSpecificBlock(nn.Module):
 
         self.norm1 = norm_layer(dim)
         padding = get_pad3d(input_resolution, window_size)
-        self.pad = nn.ZeroPad3d(padding)
+        # F.pad on channel-last (B, Pl, Lat, Lon, C) — avoids two permutes per block per step.
+        # F.pad reads padding right-to-left: (C_l, C_r, Lon_l, Lon_r, Lat_t, Lat_b, Pl_f, Pl_b)
+        self._fpad = (0, 0) + padding
 
         pad_resolution = list(input_resolution)
         pad_resolution[0] += (padding[-1] + padding[-2])
@@ -350,41 +342,40 @@ class EarthSpecificBlock(nn.Module):
             dim=dim, input_resolution=pad_resolution, window_size=window_size, num_heads=num_heads, qkv_bias=qkv_bias,
             qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop,attn_mask=attn_mask
         )
-        
+
+        # Dispatch once at init — no per-call branch in forward.
+        self._roll_neg = self.negrollX if self.roll else self.null_rollX
+        self._roll_pos = self.posrollX if self.roll else self.null_rollX
+
     def negrollX(self, x: torch.Tensor):
-        shift_pl, shift_lat, shift_lon = self.shift_size
-        return torch.roll(x, shifts=(-shift_pl, -shift_lat, -shift_lon), dims=(1, 2, 3))
-    
+        return torch.roll(x, shifts=self.neg_shifts, dims=(1, 2, 3))
+
     def null_rollX(self, x: torch.Tensor):
         return x
-    
+
     def posrollX(self, x: torch.Tensor):
-        shift_pl, shift_lat, shift_lon = self.shift_size
-        return torch.roll(x, shifts=(shift_pl, shift_lat, shift_lon), dims=(1, 2, 3))
-    
+        return torch.roll(x, shifts=self.pos_shifts, dims=(1, 2, 3))
+
     def forward(self, x: torch.Tensor):
-        """
-        Forward pass for the transformer block.
-
-        Args:
-            x (torch.Tensor): Input tensor.
-
-        Returns:
-            torch.Tensor: Output tensor after applying the transformer block.
-        """
         shortcut = x
         x = self.norm1(x)
-        x=x.unflatten(1, self.input_resolution)
-        x = self.pad(x.permute(0, 4, 1, 2, 3)).permute(0, 2, 3, 4, 1)
-        x = torch.roll(x, shifts=self.neg_shifts, dims=(1, 2, 3))
-        shifted_x=self.WindowReverse(self.attn(self.WindowPartition(x)))
-        shifted_x = torch.roll(shifted_x, shifts=self.pos_shifts, dims=(1, 2, 3))
-        shifted_x= self.Crop3d(shifted_x)
+        x = x.unflatten(1, self.input_resolution)
+        x = F.pad(x, self._fpad)
+        x = self._roll_neg(x)
+        shifted_x = self.WindowReverse(self.attn(self.WindowPartition(x)))
+        shifted_x = self._roll_pos(shifted_x)
+        shifted_x = self.Crop3d(shifted_x)
         shifted_x = shifted_x.flatten(1, 3)
         shifted_x = shortcut + self.drop_path(shifted_x)
         shifted_x = shifted_x + self.drop_path(self.mlp(self.norm2(shifted_x)))
         return shifted_x
     
+
+
+class IdentityFiLM(nn.Module):
+    """Drop-in no-op for FiLMLayer when solar conditioning is disabled."""
+    def forward(self, x: torch.Tensor, solar_vec, solar_mask) -> torch.Tensor:
+        return x
 
 
 class FiLMLayer(nn.Module):
@@ -517,20 +508,20 @@ class Pangu(pl.LightningModule):
         self.patchrecovery2d = PatchRecovery2D((self.grid_size, self.grid_size), (4, 4), (1+self.time_steps) * embed_dim, 5)
 
         # Place more weight on observed regions/channels that better represent ionospheric structure.
-        self.register_buffer("channel_weights", torch.tensor([1.2, 1.0, 1.0, 1.5, 1.1], dtype=torch.float32))
+        self.register_buffer("channel_weights",
+            torch.tensor([1.2, 1.0, 1.0, 1.5, 1.1], dtype=torch.float32).view(1, -1, 1, 1))
 
         # ── Optional FiLM solar-wind conditioning ────────────────────────────
         # solar_wind_dim=0 disables conditioning entirely (no extra parameters).
         self.solar_wind_dim = int(kwargs.get("solar_wind_dim", 0))
         self.solar_wind_dropout = float(kwargs.get("solar_wind_dropout", 0.2))
         if self.solar_wind_dim > 0:
-            # One FiLM layer per encoder/decoder stage (4 total).
-            # Encoder stages operate on embed_dim; bottleneck on embed_dim*2.
             self.film_enc  = FiLMLayer(self.solar_wind_dim, embed_dim)
             self.film_bot  = FiLMLayer(self.solar_wind_dim, embed_dim * 2)
+            self.film_bot2 = FiLMLayer(self.solar_wind_dim, embed_dim * 2)
             self.film_dec  = FiLMLayer(self.solar_wind_dim, embed_dim)
         else:
-            self.film_enc = self.film_bot = self.film_dec = None
+            self.film_enc = self.film_bot = self.film_bot2 = self.film_dec = IdentityFiLM()
 
     def _wandb_run(self):
         if self.logger is None or not hasattr(self.logger, "experiment"):
@@ -545,9 +536,6 @@ class Pangu(pl.LightningModule):
 
     def _should_log_diag_step(self, batch_idx):
         return self.log_diagnostics and (self.diagnostics_interval > 0) and (batch_idx % self.diagnostics_interval == 0)
-
-    def on_train_batch_start(self, batch, batch_idx):
-        self._batch_start_time = time.perf_counter()
 
     def on_after_backward(self):
         if not self.log_diagnostics:
@@ -633,17 +621,20 @@ class Pangu(pl.LightningModule):
         self._swap_to_ema_weights()
 
     def on_validation_epoch_start(self):
-        self._val_sse_map = None
-        self._val_count = 0
-        self._val_event_sse = 0.0
-        self._val_event_count = 0.0
-        self._val_quiet_sse = 0.0
-        self._val_quiet_count = 0.0
-        self._val_model_sse = 0.0
-        self._val_baseline_sse = 0.0
-        self._val_baseline_clim_sse = 0.0
-        self._lead_time_curve = None
-        self._val_example = None
+        dev = self.device
+        self._val_sse_map         = torch.zeros(5, self.grid_size, self.grid_size, device=dev)
+        self._val_count           = 0
+        # Tensor accumulators — no .item() / GPU sync per batch.
+        self._val_event_sse       = torch.zeros(1, device=dev)
+        self._val_event_count     = torch.zeros(1, device=dev)
+        self._val_quiet_sse       = torch.zeros(1, device=dev)
+        self._val_quiet_count     = torch.zeros(1, device=dev)
+        self._val_model_sse       = torch.zeros(1, device=dev)
+        self._val_baseline_sse    = torch.zeros(1, device=dev)
+        self._val_baseline_clim_sse = torch.zeros(1, device=dev)
+        self._lead_time_curve     = None
+        self._val_example         = None
+        self._val_example_tensors = None   # raw GPU tensors, converted in on_validation_end
 
     def on_validation_epoch_end(self):
         # self.log() is only valid here, not in on_validation_end
@@ -734,21 +725,23 @@ class Pangu(pl.LightningModule):
         return fig
 
     def _log_validation_diagnostics_scalars(self):
-        """Called from on_validation_epoch_end — self.log() is allowed here."""
+        """Called from on_validation_epoch_end — self.log() is allowed here.
+        All .item() / CPU transfers happen here, once per epoch."""
         if not self.log_diagnostics or self._val_count <= 0:
             return
 
         rmse_map = torch.sqrt(self._val_sse_map / max(self._val_count, 1)).detach().cpu().float().numpy()
         self._last_rmse_map = rmse_map  # cache for image logging
 
-        skill_pers = float(1.0 - (self._val_model_sse / max(self._val_baseline_sse, 1e-8)))
-        skill_clim = float(1.0 - (self._val_model_sse / max(self._val_baseline_clim_sse, 1e-8)))
+        model_sse = self._val_model_sse.item()
+        skill_pers = float(1.0 - model_sse / max(self._val_baseline_sse.item(), 1e-8))
+        skill_clim = float(1.0 - model_sse / max(self._val_baseline_clim_sse.item(), 1e-8))
 
         payload = {
             "diag/val_skill_persistence": skill_pers,
             "diag/val_skill_climatology": skill_clim,
-            "diag/val_event_mse":  float(self._val_event_sse  / max(self._val_event_count,  1.0)),
-            "diag/val_quiet_mse":  float(self._val_quiet_sse  / max(self._val_quiet_count,  1.0)),
+            "diag/val_event_mse": float(self._val_event_sse.item() / max(self._val_event_count.item(), 1.0)),
+            "diag/val_quiet_mse": float(self._val_quiet_sse.item() / max(self._val_quiet_count.item(), 1.0)),
         }
         for c, name in enumerate(self._CH_NAMES):
             if c < rmse_map.shape[0]:
@@ -781,8 +774,16 @@ class Pangu(pl.LightningModule):
             self._wandb_log({"diag/val_rmse_map": wandb.Image(rmse_fig)})
             plt.close(rmse_fig)
 
-            if self._val_example is not None:
-                ex_x, ex_y, ex_yhat, ex_res, ex_solar = self._val_example
+            # Convert stored raw tensors to numpy here — single CPU transfer per epoch.
+            if self._val_example_tensors is not None:
+                t_x, t_y, t_yhat, t_sv = self._val_example_tensors
+                ex_x    = t_x.cpu().float().numpy()
+                ex_y    = t_y.cpu().float().numpy()
+                ex_yhat = t_yhat.cpu().float().numpy()
+                ex_res  = (t_yhat - t_y).cpu().float().numpy()
+                sv_list = t_sv.cpu().tolist()
+                keys    = ["Bx", "By", "Bz", "Kp", "Vx"][:len(sv_list)]
+                ex_solar = dict(zip(keys, sv_list)) if any(v != 0.0 for v in sv_list) else None
                 panel_fig = self._plot_channel_grid(
                     ex_x, ex_y, ex_yhat,
                     title_prefix=f"epoch {self.current_epoch}",
@@ -790,7 +791,6 @@ class Pangu(pl.LightningModule):
                 )
                 self._wandb_log({"diag/val_example_panel": wandb.Image(panel_fig)})
                 plt.close(panel_fig)
-
                 self._wandb_log({"diag/val_residual_hist": wandb.Histogram(ex_res.reshape(-1))})
 
             if self._lead_time_curve is not None:
@@ -817,84 +817,70 @@ class Pangu(pl.LightningModule):
         x = self.layer4(x)
         return x, layer1_out
 
-    def _apply_film(self, x, film_layer, solar_vec, solar_mask):
-        """Apply a FiLM layer if solar conditioning is active, else pass through."""
-        if film_layer is None or solar_vec is None:
-            return x
-        return film_layer(x, solar_vec, solar_mask)
-
     def _forward_with_solar(self, x, solar_vec=None, solar_mask=None):
-        """Full encoder-decoder pass with optional FiLM conditioning."""
-        layer1_out = self.layer1(x)
-        layer1_out = self._apply_film(layer1_out, self.film_enc, solar_vec, solar_mask)
+        """Full encoder-decoder pass with FiLM conditioning (IdentityFiLM when disabled)."""
+        layer1_out = self.film_enc(self.layer1(x), solar_vec, solar_mask)
 
-        x = self.downsample(layer1_out)
-        x = self.layer2(x)
-        x = self._apply_film(x, self.film_bot, solar_vec, solar_mask)
-        x = self.layer3(x)
-        x = self._apply_film(x, self.film_bot, solar_vec, solar_mask)
+        x = self.film_bot(self.layer2(self.downsample(layer1_out)), solar_vec, solar_mask)
+        x = self.film_bot2(self.layer3(x), solar_vec, solar_mask)
 
-        x = self.upsample(x)
-        x = self.layer4(x)
-        x = self._apply_film(x, self.film_dec, solar_vec, solar_mask)
+        x = self.film_dec(self.layer4(self.upsample(x)), solar_vec, solar_mask)
         return x, layer1_out
 
     def _forecast_latent(self, x, add_noise=False, solar_vec=None, solar_mask=None):
-        if self.time_steps <= 0:
-            return x
+        noise_scale = self.noise_factor if (add_noise and self.noise_factor > 0) else 0.0
+        skips = []
 
-        b, n, c = x.shape
-        skip_stack = x.new_empty((self.time_steps, b, n, c))
+        if noise_scale > 0.0:
+            for _ in range(self.time_steps):
+                x, skip = self._forward_with_solar(
+                    x + torch.randn_like(x) * noise_scale, solar_vec, solar_mask)
+                skips.append(skip)
+        else:
+            for _ in range(self.time_steps):
+                x, skip = self._forward_with_solar(x, solar_vec, solar_mask)
+                skips.append(skip)
 
-        for t in range(self.time_steps):
-            inp = x + (torch.randn_like(x) * self.noise_factor) if (add_noise and self.noise_factor > 0) else x
-            x, skip = self._forward_with_solar(inp, solar_vec, solar_mask)
-            skip_stack[t] = skip
-
-        skip_cat = skip_stack.permute(1, 2, 0, 3).reshape(b, n, self.time_steps * c)
+        # torch.stack keeps all skips in the autograd graph (no in-place writes).
+        skip_cat = torch.stack(skips, dim=2).reshape(x.shape[0], x.shape[1], self.time_steps * x.shape[2])
         return torch.cat((x, skip_cat), dim=-1)
 
     def _decode_from_latent(self, latent):
         decoded = latent.transpose(1, 2).unflatten(2, self.reduced_grid)
         return self.patchrecovery2d(decoded)
 
-    def _lead_time_mse_curve(self, x_emb, y, solar_vec=None, solar_mask=None):
+    @torch._dynamo.disable
+    def _lead_time_mse_curve(self, x_emb, x_in, y, solar_vec=None, solar_mask=None):
         if self.time_steps <= 1:
             lat = self._forecast_latent(x_emb, add_noise=False, solar_vec=solar_vec, solar_mask=solar_mask)
-            return [(1, float(self.metric_mse(self._decode_from_latent(lat), y).item()))]
+            y_hat = x_in + self._decode_from_latent(lat)
+            return [(1, float(self.metric_mse(y_hat, y).item()))]
 
         curve = []
         for h in range(1, min(self.time_steps, 6) + 1):
             old_steps = self.time_steps
             self.time_steps = h
             with torch.no_grad():
-                lat  = self._forecast_latent(x_emb, add_noise=False, solar_vec=solar_vec, solar_mask=solar_mask)
-                pred = self._decode_from_latent(lat)
-                mse  = self.metric_mse(pred, y)
+                lat   = self._forecast_latent(x_emb, add_noise=False, solar_vec=solar_vec, solar_mask=solar_mask)
+                y_hat = x_in + self._decode_from_latent(lat)
+                mse   = self.metric_mse(y_hat, y)
             self.time_steps = old_steps
             curve.append((h, float(mse.item())))
         return curve
 
     def _weighted_loss(self, y_hat, y):
-        # Weighted Huber improves stability while emphasizing high-value channels and observed regions.
         error = F.smooth_l1_loss(y_hat, y, reduction='none', beta=0.1)
-        channel_weights = self.channel_weights.view(1, -1, 1, 1).to(y_hat.device)
-        obs_weight = 1.0 + y[:, 3:4].abs()  # occupancy-like channel
-        spatial_weights = channel_weights.expand_as(error).clone()
-        spatial_weights[:, 3:4] = channel_weights[:, 3:4] * obs_weight
-        return (error * spatial_weights).mean()
+        weighted = error * self.channel_weights
+        # After z-score normalisation, active cells (raw occ=1) have y[:,3]>0;
+        # inactive cells (raw occ=0) have y[:,3]<0.
+        occ_weight = torch.where(y[:, 3:4] > 0.0,
+                                 torch.full_like(y[:, 3:4], 4.0),
+                                 torch.ones_like(y[:, 3:4]))
+        return (weighted * occ_weight).sum() / occ_weight.sum()
 
     def _unpack_solar(self, batch):
-        """
-        Extract solar wind vector and availability mask from a batch.
-        Batch may be (x, y) or (x, solar_vec, solar_mask, y).
-        Returns (solar_vec, solar_mask) or (None, None) if not present.
-        """
-        if len(batch) == 4:
-            solar_vec  = batch[1].float()   # (x, solar_vec, solar_mask, y)
-            solar_mask = batch[2].float()
-            return solar_vec, solar_mask
-        return None, None
+        """Extract solar wind vector and availability mask from a (x, sv, sm, y) batch."""
+        return batch[1].float(), batch[2].float()
 
     def training_step(self, batch, batch_idx):
         """
@@ -908,35 +894,41 @@ class Pangu(pl.LightningModule):
             torch.Tensor: Training loss.
         """
         solar_vec, solar_mask = self._unpack_solar(batch)
-        x, y = batch[0], batch[-1]
+        x_in, y = batch[0], batch[-1]
+        delta_target = y - x_in
         # Random dropout of solar conditioning during training
-        if solar_mask is not None and self.solar_wind_dropout > 0 and self.training:
+        if self.solar_wind_dropout > 0:
             drop = (torch.rand(solar_mask.shape[0], device=solar_mask.device)
                     < self.solar_wind_dropout).float().unsqueeze(1)
             solar_mask = solar_mask * (1.0 - drop)
-        x = self.patchembed2d(x)
+        x = self.patchembed2d(x_in)
         x = x.flatten(2,3).transpose(1, 2)
-        x = self._forecast_latent(x, add_noise=True, solar_vec=solar_vec, solar_mask=solar_mask)
-        x = self._decode_from_latent(x)
-        loss = self._weighted_loss(x, y)
-        mse = self.metric_mse(x, y)
+        delta_hat = self._decode_from_latent(
+            self._forecast_latent(x, add_noise=True, solar_vec=solar_vec, solar_mask=solar_mask))
+        loss = self._weighted_loss(delta_hat, delta_target)
+        y_hat = x_in + delta_hat
+        mse = self.metric_mse(y_hat, y)
         self.log('train_loss', loss, on_epoch=True, prog_bar=True)
         self.log('train_mse', mse, on_epoch=True, prog_bar=False)
 
         if self._should_log_diag_step(batch_idx):
-            pred_mean = x.detach().mean(dim=(0, 2, 3))
-            pred_std = x.detach().std(dim=(0, 2, 3), unbiased=False)
-            target_mean = y.detach().mean(dim=(0, 2, 3))
-            target_std = y.detach().std(dim=(0, 2, 3), unbiased=False)
-            payload = {}
-            for c in range(x.shape[1]):
-                payload[f"diag/train_pred_mean_c{c}"] = float(pred_mean[c].item())
-                payload[f"diag/train_pred_std_c{c}"] = float(pred_std[c].item())
-                payload[f"diag/train_target_mean_c{c}"] = float(target_mean[c].item())
-                payload[f"diag/train_target_std_c{c}"] = float(target_std[c].item())
-            self._wandb_log(payload)
+            self._log_train_diag(delta_hat.detach(), delta_target.detach())
 
         return loss
+
+    @torch._dynamo.disable
+    def _log_train_diag(self, x, y):
+        pred_mean   = x.mean(dim=(0, 2, 3))
+        pred_std    = x.std(dim=(0, 2, 3), unbiased=False)
+        target_mean = y.mean(dim=(0, 2, 3))
+        target_std  = y.std(dim=(0, 2, 3), unbiased=False)
+        payload = {}
+        for c in range(x.shape[1]):
+            payload[f"diag/train_pred_mean_c{c}"]   = float(pred_mean[c].item())
+            payload[f"diag/train_pred_std_c{c}"]    = float(pred_std[c].item())
+            payload[f"diag/train_target_mean_c{c}"] = float(target_mean[c].item())
+            payload[f"diag/train_target_std_c{c}"]  = float(target_std[c].item())
+        self._wandb_log(payload)
 
     def validation_step(self, batch, batch_idx):
         """
@@ -950,51 +942,41 @@ class Pangu(pl.LightningModule):
             torch.Tensor: Validation loss.
         """
         solar_vec, solar_mask = self._unpack_solar(batch)
-        x, y = batch[0], batch[-1]
-        x_in = x
-        x = self.patchembed2d(x)
+        x_in, y = batch[0], batch[-1]
+        delta_target = y - x_in
+        x = self.patchembed2d(x_in)
         x = x.flatten(2,3).transpose(1, 2)
         latent = self._forecast_latent(x, add_noise=False, solar_vec=solar_vec, solar_mask=solar_mask)
-        y_hat = self._decode_from_latent(latent)
-        loss = self._weighted_loss(y_hat, y)
+        delta_hat = self._decode_from_latent(latent)
+        loss = self._weighted_loss(delta_hat, delta_target)
+        y_hat = x_in + delta_hat
         mse = self.metric_mse(y_hat, y)
 
         sq_err = (y_hat.detach() - y.detach()).pow(2)
-        if self._val_sse_map is None:
-            self._val_sse_map = sq_err.sum(dim=0)
-        else:
-            self._val_sse_map += sq_err.sum(dim=0)
-        self._val_count += int(y.shape[0])
+        self._val_sse_map += sq_err.sum(dim=0)
+        self._val_count += y.shape[0]
 
-        occ_mask = (y[:, 3:4].abs() > 0.05).expand_as(sq_err)
+        occ_mask   = (y[:, 3:4].abs() > 0.05).expand_as(sq_err)
         quiet_mask = ~occ_mask
-        self._val_event_sse += float((sq_err * occ_mask).sum().item())
-        self._val_event_count += float(occ_mask.sum().item())
-        self._val_quiet_sse += float((sq_err * quiet_mask).sum().item())
-        self._val_quiet_count += float(quiet_mask.sum().item())
+        self._val_event_sse   += (sq_err * occ_mask).sum()
+        self._val_event_count += occ_mask.sum()
+        self._val_quiet_sse   += (sq_err * quiet_mask).sum()
+        self._val_quiet_count += quiet_mask.sum()
+        self._val_model_sse        += sq_err.sum()
+        self._val_baseline_sse     += (x_in.detach() - y.detach()).pow(2).sum()
+        self._val_baseline_clim_sse += y.detach().pow(2).sum()
 
-        model_sse = float(sq_err.sum().item())
-        baseline_sse = float((x_in.detach() - y.detach()).pow(2).sum().item())
-        baseline_clim_sse = float(y.detach().pow(2).sum().item())
-        self._val_model_sse += model_sse
-        self._val_baseline_sse += baseline_sse
-        self._val_baseline_clim_sse += baseline_clim_sse
-
+        # Store raw tensors for first batch; CPU transfer deferred to on_validation_end.
         if batch_idx == 0:
-            ex_x    = x_in[0].detach().cpu().float().numpy()
-            ex_y    = y[0].detach().cpu().float().numpy()
-            ex_yhat = y_hat[0].detach().cpu().float().numpy()
-            ex_res  = (y_hat[0] - y[0]).detach().cpu().float().numpy()
-            # Build a human-readable IMF annotation if solar data is present
-            ex_solar = None
-            if solar_vec is not None:
-                sv = solar_vec[0].detach().cpu().tolist()
-                keys = ["Bx", "By", "Bz", "Kp", "Vx"][:len(sv)]
-                ex_solar = dict(zip(keys, sv))
-            self._val_example = (ex_x, ex_y, ex_yhat, ex_res, ex_solar)
+            self._val_example_tensors = (
+                x_in[0].detach(),
+                y[0].detach(),
+                y_hat[0].detach(),
+                solar_vec[0].detach(),
+            )
             if self.log_diagnostics:
                 self._lead_time_curve = self._lead_time_mse_curve(
-                    x, y, solar_vec=solar_vec, solar_mask=solar_mask)
+                    x, x_in, y, solar_vec=solar_vec, solar_mask=solar_mask)
         self.log('val_loss', loss, on_epoch=True, prog_bar=True)
         self.log('val_mse', mse, on_epoch=True, prog_bar=True)
         return loss
@@ -1031,34 +1013,52 @@ class Pangu(pl.LightningModule):
         Returns:
             torch.Tensor: Test loss.
         """
-        x, y = batch
-        x = self.patchembed2d(x)
+        solar_vec, solar_mask = self._unpack_solar(batch)
+        x_in, y = batch[0], batch[-1]
+        x = self.patchembed2d(x_in)
         x = x.flatten(2, 3).transpose(1, 2)
-        y_hat = self._forecast_latent(x, add_noise=False)
-        y_hat = y_hat.transpose(1, 2).unflatten(2,self.reduced_grid)
-        y_hat = self.patchrecovery2d(y_hat)
-        loss = self._weighted_loss(y_hat, y)
-        mse = self.metric_mse(y_hat, y)
+        delta_hat = self._decode_from_latent(
+            self._forecast_latent(x, add_noise=False, solar_vec=solar_vec, solar_mask=solar_mask))
+        loss = self._weighted_loss(delta_hat, y - x_in)
+        mse = self.metric_mse(x_in + delta_hat, y)
         self.log('test_loss', loss, on_epoch=True, prog_bar=True)
         self.log('test_mse', mse, on_epoch=True, prog_bar=True)
         return loss
 
     def configure_optimizers(self):
-        """
-        Configures the optimizer for training.
+        # Split parameters: weight decay harms 1-D params (norm γ/β, biases) and
+        # learned position biases — regularising them toward zero kills positional
+        # structure and makes LayerNorm ineffective.
+        decay, no_decay = [], []
+        seen = set()
+        for name, p in self.named_parameters():
+            if not p.requires_grad or id(p) in seen:
+                continue
+            seen.add(id(p))
+            if p.ndim <= 1 or name.endswith('.bias') or 'position_bias' in name:
+                no_decay.append(p)
+            else:
+                decay.append(p)
 
-        Returns:
-            torch.optim.Optimizer: Configured optimizer.
-        """
-        optimizer = torch.optim.AdamW(self.parameters(), lr=self.learning_rate, betas=(0.9, 0.999), eps=1e-08,
-                                      weight_decay=self.weight_decay)
+        optimizer = torch.optim.AdamW(
+            [{'params': decay,    'weight_decay': self.weight_decay},
+             {'params': no_decay, 'weight_decay': 0.0}],
+            lr=self.learning_rate, betas=(0.9, 0.999), eps=1e-08,
+        )
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimizer, mode='min', factor=0.5, patience=5
         )
         return {
             "optimizer": optimizer,
-            "lr_scheduler": {
-                "scheduler": scheduler,
-                "monitor": "val_loss",
-            },
+            "lr_scheduler": {"scheduler": scheduler, "monitor": "val_mse"},
         }
+
+    def on_train_batch_start(self, batch, batch_idx):
+        self._batch_start_time = time.perf_counter()
+        # Linear warmup: ramp LR from 0 → learning_rate over the first warmup steps.
+        warmup = int(getattr(self, '_warmup_steps', 500))
+        step = int(self.global_step)
+        if step < warmup:
+            scale = (step + 1) / warmup
+            for pg in self.optimizers().param_groups:
+                pg['lr'] = self.learning_rate * scale

@@ -76,39 +76,31 @@ class UpSample(nn.Module):
         self.linear1 = nn.Linear(in_dim, out_dim * 4, bias=False)
         self.linear2 = nn.Linear(out_dim, out_dim, bias=False)
         self.norm = nn.LayerNorm(out_dim)
-        self.input_resolution = input_resolution
-        self.output_resolution = output_resolution
+        in_pl, in_lat, in_lon = input_resolution
+        out_pl, out_lat, out_lon = output_resolution
+        assert in_pl == out_pl, "the dimension of pressure level shouldn't change"
+        pt = (in_lat * 2 - out_lat) // 2
+        pb = (in_lat * 2 - out_lat) - pt
+        pl = (in_lon * 2 - out_lon) // 2
+        pr = (in_lon * 2 - out_lon) - pl
+        self._in_pl  = in_pl
+        self._in_lat = in_lat
+        self._in_lon = in_lon
+        self._crop = (
+            slice(None),
+            slice(None, out_pl),
+            slice(pt, 2 * in_lat - pb if pb else None),
+            slice(pl, 2 * in_lon - pr if pr else None),
+            slice(None),
+        )
 
     def forward(self, x: torch.Tensor):
-        """
-        Forward pass for up-sampling.
-
-        Args:
-            x (torch.Tensor): Input tensor of shape (B, N, C).
-
-        Returns:
-            torch.Tensor: Up-sampled tensor.
-        """
-        B, N, C = x.shape
-        in_pl, in_lat, in_lon = self.input_resolution
-        out_pl, out_lat, out_lon = self.output_resolution
-
+        B, _, C = x.shape
         x = self.linear1(x)
-        x = x.reshape(B, in_pl, in_lat, in_lon, 2, 2, C // 2).permute(0, 1, 2, 4, 3, 5, 6)
-        x = x.reshape(B, in_pl, in_lat * 2, in_lon * 2, -1)
-
-        assert in_pl == out_pl, "the dimension of pressure level shouldn't change"
-        pad_h = in_lat * 2 - out_lat
-        pad_w = in_lon * 2 - out_lon
-
-        pad_top = pad_h // 2
-        pad_bottom = pad_h - pad_top
-
-        pad_left = pad_w // 2
-        pad_right = pad_w - pad_left
-
-        x = x[:, :out_pl, pad_top: 2 * in_lat - pad_bottom, pad_left: 2 * in_lon - pad_right, :]
-        x = x.reshape(x.shape[0], x.shape[1] * x.shape[2] * x.shape[3], x.shape[4])
+        x = (x.reshape(B, self._in_pl, self._in_lat, self._in_lon, 2, 2, C // 2)
+              .permute(0, 1, 2, 4, 3, 5, 6)
+              .reshape(B, self._in_pl, self._in_lat * 2, self._in_lon * 2, -1))
+        x = x[self._crop].reshape(B, -1, x.shape[-1])
         x = self.norm(x)
         x = self.linear2(x)
         return x
@@ -128,48 +120,35 @@ class DownSample(nn.Module):
         super().__init__()
         self.linear = nn.Linear(in_dim * 4, in_dim * 2, bias=False)
         self.norm = nn.LayerNorm(4 * in_dim)
-        self.input_resolution = input_resolution
-        self.output_resolution = output_resolution
 
-        in_pl, in_lat, in_lon = self.input_resolution
-        out_pl, out_lat, out_lon = self.output_resolution
-
+        in_pl, in_lat, in_lon   = input_resolution
+        out_pl, out_lat, out_lon = output_resolution
         assert in_pl == out_pl, "the dimension of pressure level shouldn't change"
+
         h_pad = out_lat * 2 - in_lat
         w_pad = out_lon * 2 - in_lon
-
-        pad_top = h_pad // 2
+        pad_top    = h_pad // 2
         pad_bottom = h_pad - pad_top
+        pad_left   = w_pad // 2
+        pad_right  = w_pad - pad_left
 
-        pad_left = w_pad // 2
-        pad_right = w_pad - pad_left
-
-        pad_front = pad_back = 0
-
-        self.pad = torch.nn.ZeroPad3d(
-            (pad_left, pad_right, pad_top, pad_bottom, pad_front, pad_back)
-        )
+        # Resolve all shape constants once; F.pad avoids the permute-ZeroPad3d-permute pattern.
+        # F.pad on (B, Pl, Lat, Lon, C): (C_l, C_r, Lon_l, Lon_r, Lat_t, Lat_b, Pl_f, Pl_b)
+        self._fpad    = (0, 0, pad_left, pad_right, pad_top, pad_bottom, 0, 0)
+        self._in_pl   = in_pl
+        self._in_lat  = in_lat
+        self._in_lon  = in_lon
+        self._out_lat = out_lat
+        self._out_lon = out_lon
+        self._out_n   = out_pl * out_lat * out_lon
 
     def forward(self, x: torch.Tensor):
-        """
-        Forward pass for down-sampling.
-
-        Args:
-            x (torch.Tensor): Input tensor of shape (B, N, C).
-
-        Returns:
-            torch.Tensor: Down-sampled tensor.
-        """
         B, N, C = x.shape
-        in_pl, in_lat, in_lon = self.input_resolution
-        out_pl, out_lat, out_lon = self.output_resolution
-        x = x.reshape(B, in_pl, in_lat, in_lon, C)
-
-        # Padding the input to facilitate downsampling
-        x = self.pad(x.permute(0, -1, 1, 2, 3)).permute(0, 2, 3, 4, 1)
-        x = x.reshape(B, in_pl, out_lat, 2, out_lon, 2, C).permute(0, 1, 2, 4, 3, 5, 6)
-        x = x.reshape(B, out_pl * out_lat * out_lon, 4 * C)
-
+        x = x.reshape(B, self._in_pl, self._in_lat, self._in_lon, C)
+        x = torch.nn.functional.pad(x, self._fpad)
+        x = (x.reshape(B, self._in_pl, self._out_lat, 2, self._out_lon, 2, C)
+              .permute(0, 1, 2, 4, 3, 5, 6)
+              .reshape(B, self._out_n, 4 * C))
         x = self.norm(x)
         x = self.linear(x)
         return x
@@ -237,28 +216,20 @@ class Crop3D(nn.Module):
 
     def __init__(self, padding):
         super().__init__()
-        self.padding_front, self.padding_back = padding[-1], padding[-2]
-        self.padding_top, self.padding_bottom = padding[2], padding[3]
-        self.padding_left, self.padding_right = padding[0], padding[1]
+        pf, pb  = padding[-1], padding[-2]
+        pt, pbo = padding[2],  padding[3]
+        pl, pr  = padding[0],  padding[1]
+        # Pre-compute once; all values are fixed for the life of the module.
+        self._crop = (
+            slice(None),
+            slice(pf, -pb  if pb  else None),
+            slice(pt, -pbo if pbo else None),
+            slice(pl, -pr  if pr  else None),
+            slice(None),
+        )
 
     def forward(self, x: torch.Tensor):
-        """
-        Forward pass for cropping a 3D tensor.
-
-        Args:
-            x (torch.Tensor): Input tensor.
-
-        Returns:
-            torch.Tensor: Cropped tensor.
-        """
-        end_pl = -self.padding_back if self.padding_back > 0 else None
-        end_lat = -self.padding_bottom if self.padding_bottom > 0 else None
-        end_lon = -self.padding_right if self.padding_right > 0 else None
-        return x[:,
-            self.padding_front:end_pl,
-            self.padding_top:end_lat,
-            self.padding_left:end_lon,
-            :]
+        return x[self._crop]
 
 
 def get_pad3d(input_resolution, window_size):
@@ -438,31 +409,23 @@ class PatchRecovery2D(nn.Module):
 
     def __init__(self, img_size, patch_size, in_chans, out_chans):
         super().__init__()
-        self.img_size = img_size
         self.conv = nn.ConvTranspose2d(in_chans, out_chans, patch_size, patch_size)
+        H, W   = img_size
+        ph, pw = patch_size
+        out_H  = -(-H // ph) * ph   # ceil(H/ph)*ph
+        out_W  = -(-W // pw) * pw
+        pt  = (out_H - H) // 2
+        pb  = out_H - H - pt
+        pl  = (out_W - W) // 2
+        pr  = out_W - W - pl
+        self._crop = (
+            slice(None), slice(None),
+            slice(pt, out_H - pb if pb else None),
+            slice(pl, out_W - pr if pr else None),
+        )
 
     def forward(self, x: torch.Tensor):
-        """
-        Forward pass for patch recovery.
-
-        Args:
-            x (torch.Tensor): Input tensor.
-
-        Returns:
-            torch.Tensor: Recovered image tensor.
-        """
-        output = self.conv(x)
-        _, _, H, W = output.shape
-        h_pad = H - self.img_size[0]
-        w_pad = W - self.img_size[1]
-
-        padding_top = h_pad // 2
-        padding_bottom = int(h_pad - padding_top)
-
-        padding_left = w_pad // 2
-        padding_right = int(w_pad - padding_left)
-
-        return output[:, :, padding_top: H - padding_bottom, padding_left: W - padding_right]
+        return self.conv(x)[self._crop]
 
 
 class PatchRecovery3D(nn.Module):
@@ -561,7 +524,7 @@ class WindowPartition(nn.Module):
             torch.Tensor: Partitioned windows.
         """
         x = x.view(*self.xview_shape)
-        windows = x.permute(0, 5, 1, 3, 2, 4, 6, 7).contiguous().view(*self.view_shape)
+        windows = x.permute(0, 5, 1, 3, 2, 4, 6, 7).reshape(*self.view_shape)
         return windows
 
 
@@ -619,7 +582,7 @@ class WindowReverse(nn.Module):
             torch.Tensor: Reconstructed tensor.
         """
         x = windows.unflatten(2, self.window_size).view(*self.windows_view_shape)
-        x = x.permute(0, 2, 4, 3, 5, 1, 6, 7).contiguous().view(*self.xview_shape)
+        x = x.permute(0, 2, 4, 3, 5, 1, 6, 7).reshape(*self.xview_shape)
         return x
 
 

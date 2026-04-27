@@ -210,10 +210,10 @@ class SolarDataset(Dataset):
         self.imf_files = imf_files  # parallel list to base.dataA
         self._imf_avail = bool(imf_files)
 
-        # Pre-compute IMF normalisation (mean/std) from a small sample
+        # Pre-compute IMF normalisation (mean/std) from a representative sample
         if self._imf_avail:
             sample = []
-            for f in imf_files[:20]:
+            for f in imf_files[:100]:
                 try:
                     sample.append(np.load(f, mmap_mode='r')[:50])
                 except Exception:
@@ -221,7 +221,10 @@ class SolarDataset(Dataset):
             if sample:
                 arr = np.concatenate(sample, axis=0).astype(np.float64)
                 self._imf_mean = arr.mean(axis=0).astype(np.float32)
-                self._imf_std  = np.maximum(arr.std(axis=0), 1e-6).astype(np.float32)
+                # Floor at 1.0 — any IMF field with near-zero variance is likely
+                # missing/constant; normalising by 1e-6 would explode rare non-zero
+                # readings to ~1e6, overflowing float16 in the FiLM MLP.
+                self._imf_std  = np.maximum(arr.std(axis=0), 1.0).astype(np.float32)
             else:
                 self._imf_mean = np.zeros(IMF_DIM, dtype=np.float32)
                 self._imf_std  = np.ones(IMF_DIM,  dtype=np.float32)
@@ -231,8 +234,12 @@ class SolarDataset(Dataset):
 
     def __getitem__(self, idx):
         x, y = self.base[idx]
+
         if not self._imf_avail:
-            return x, y
+            return (x,
+                    torch.zeros(IMF_DIM, dtype=torch.float32),
+                    torch.zeros(1,       dtype=torch.float32),
+                    y)
 
         # Locate which chunk and offset (mirrors DatasetFromPresaved logic)
         idx        = int(idx % len(self.base))
@@ -240,18 +247,19 @@ class SolarDataset(Dataset):
         prev_total = int(self.base.cumulative_sizes[file_index - 1]) if file_index > 0 else 0
         offset     = idx - prev_total
 
-        try:
-            raw = np.load(self.imf_files[file_index], mmap_mode='r')[offset]
-            imf_norm = (raw - self._imf_mean) / self._imf_std
-            # mask=1 if any field is non-zero (real measurement available)
-            mask = float(np.any(raw != 0.0))
-        except Exception:
-            imf_norm = np.zeros(IMF_DIM, dtype=np.float32)
-            mask     = 0.0
+        imf_norm = np.zeros(IMF_DIM, dtype=np.float32)
+        mask     = 0.0
+        if file_index < len(self.imf_files):
+            arr = np.load(self.imf_files[file_index], mmap_mode='r')
+            if offset < len(arr):
+                raw      = arr[offset]
+                imf_norm = np.clip((raw - self._imf_mean) / self._imf_std, -5.0, 5.0)
+                mask     = float(np.any(raw != 0.0))
 
-        solar_vec  = torch.tensor(imf_norm,  dtype=torch.float32)
-        solar_mask = torch.tensor([mask],    dtype=torch.float32)
-        return x, solar_vec, solar_mask, y
+        return (x,
+                torch.tensor(imf_norm, dtype=torch.float32),
+                torch.tensor([mask],   dtype=torch.float32),
+                y)
 
 
 # ── data module ───────────────────────────────────────────────────────────────
@@ -314,14 +322,16 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--cnvmap_dir",    default=os.path.expanduser("~/rst/extracted_data"))
     p.add_argument("--cache_dir",     default=os.path.expanduser("~/rst/preprocessed"))
-    p.add_argument("--grid_size",     type=int,   default=120)
-    p.add_argument("--embed_dim",     type=int,   default=64)
+    p.add_argument("--grid_size",     type=int,   default=240)
+    p.add_argument("--embed_dim",     type=int,   default=128)
     p.add_argument("--mlp_ratio",     type=int,   default=2)
     p.add_argument("--batch_size",    type=int,   default=8)
-    p.add_argument("--lr",            type=float, default=1e-3)
-    p.add_argument("--max_files",     type=int,   default=500,
+    p.add_argument("--lr",            type=float, default=3e-4)
+    p.add_argument("--warmup_steps",  type=int,   default=1000)
+    p.add_argument("--grad_clip",     type=float, default=1.0)
+    p.add_argument("--max_files",     type=int,   default=0,
                    help="0 = use all 26k files")
-    p.add_argument("--epochs",        type=int,   default=20)
+    p.add_argument("--epochs",        type=int,   default=100)
     p.add_argument("--preprocess",    action="store_true",
                    help="Force re-preprocess even if cache exists")
     p.add_argument("--imf_only",      action="store_true",
@@ -335,11 +345,18 @@ def main():
     p.add_argument("--run_name",      default=None)
     p.add_argument("--no_solar",      action="store_true",
                    help="Disable solar-wind FiLM conditioning even if IMF files exist")
+    p.add_argument("--resume_from",   default=None,
+                   help="Path to checkpoint to resume from (auto-detects latest if 'auto')")
     args = p.parse_args()
     if args.max_files == 0:
         args.max_files = None
 
     torch.set_float32_matmul_precision("medium")
+    torch.backends.cudnn.benchmark = True
+    if torch.cuda.is_available():
+        print(f"  SDPA backends — flash: {torch.backends.cuda.flash_sdp_enabled()}, "
+              f"mem_efficient: {torch.backends.cuda.mem_efficient_sdp_enabled()}, "
+              f"math: {torch.backends.cuda.math_sdp_enabled()}")
 
     # ── derive cache path (grid_size + file count make it unique) ─────────────
     tag      = f"g{args.grid_size}_f{args.max_files or 'all'}"
@@ -380,9 +397,14 @@ def main():
         diagnostics_interval=20,
         log_images_every_n_val_epochs=5,
     )
+    model._warmup_steps = args.warmup_steps
     total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"\n  parameters: {total_params:,}  "
           f"grid: {args.grid_size}×{args.grid_size}  embed_dim: {args.embed_dim}\n")
+
+    if not args.fast_dev_run and hasattr(torch, "compile"):
+        print("  Compiling model with torch.compile...")
+        model = torch.compile(model)
 
     # ── logger ────────────────────────────────────────────────────────────────
     logtool = None
@@ -420,7 +442,7 @@ def main():
         accelerator="auto", devices="auto",
         precision=precision,
         max_epochs=args.epochs,
-        gradient_clip_val=0.25,
+        gradient_clip_val=args.grad_clip,
         callbacks=callbacks,
         logger=logtool,
         fast_dev_run=args.fast_dev_run,
@@ -428,7 +450,18 @@ def main():
         enable_model_summary=True,
     )
 
-    trainer.fit(model, dm)
+    ckpt_path = args.resume_from
+    if ckpt_path == "auto":
+        ckpts = sorted(
+            (os.path.getmtime(os.path.join(args.ckpt_dir, f)), f)
+            for f in os.listdir(args.ckpt_dir)
+            if f.endswith(".ckpt")
+        )
+        ckpt_path = os.path.join(args.ckpt_dir, ckpts[-1][1]) if ckpts else None
+        if ckpt_path:
+            print(f"  Resuming from: {ckpt_path}")
+
+    trainer.fit(model, dm, ckpt_path=ckpt_path)
 
     if not args.fast_dev_run:
         results = trainer.validate(model, dm.val_dataloader())

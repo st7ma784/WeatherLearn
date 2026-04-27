@@ -22,3 +22,4 @@ PTL/lightning_logs/
 PTL/data/
 PTL/results/
 PTL/wandb/
+PTL/checkpoints_baseline/
