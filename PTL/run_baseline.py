@@ -281,6 +281,11 @@ class PresavedDataModule(pl.LightningDataModule):
         rng = np.random.default_rng(42)
         sample_idx = rng.choice(n_train, size=min(2000, n_train), replace=False)
         stats = base.compute_stats_from_indices(sample_idx.astype(np.int64))
+        # Delta prediction requires identical normalization for x and y:
+        # delta = y_norm - x_norm must equal (y_raw - x_raw)/std exactly.
+        # Separate stats introduce a per-channel bias in every empty cell.
+        stats['y_mean'] = stats['x_mean'].copy()
+        stats['y_std']  = stats['x_std'].copy()
         base.set_normalization_stats(stats)
 
         # Load parallel IMF files if they exist
@@ -300,8 +305,8 @@ class PresavedDataModule(pl.LightningDataModule):
 
         solar_dim = IMF_DIM if (self.use_solar and imf_files) else 0
         print(f"  train: {n_train:,}  val: {n_val:,}  solar_dim: {solar_dim}")
-        print(f"  x_mean: {stats['x_mean'].round(3)}")
-        print(f"  x_std:  {stats['x_std'].round(3)}")
+        print(f"  shared mean: {stats['x_mean'].round(4)}")
+        print(f"  shared std:  {stats['x_std'].round(4)}")
         self.solar_dim = solar_dim
 
     def train_dataloader(self):
@@ -328,7 +333,7 @@ def main():
     p.add_argument("--batch_size",    type=int,   default=8)
     p.add_argument("--lr",            type=float, default=3e-4)
     p.add_argument("--warmup_steps",  type=int,   default=1000)
-    p.add_argument("--grad_clip",     type=float, default=1.0)
+    p.add_argument("--grad_clip",     type=float, default=5.0)
     p.add_argument("--max_files",     type=int,   default=0,
                    help="0 = use all 26k files")
     p.add_argument("--epochs",        type=int,   default=100)
@@ -409,34 +414,36 @@ def main():
     # ── logger ────────────────────────────────────────────────────────────────
     logtool = None
     if args.wandb and not args.fast_dev_run:
-        try:
-            from pytorch_lightning.loggers import WandbLogger
-            run_name = args.run_name or f"baseline-{tag}"
-            logtool = WandbLogger(
-                project=args.wandb_project,
-                entity=args.wandb_entity,
-                name=run_name,
-                save_dir=args.ckpt_dir,
-                log_model=False,
-                config=vars(args),
-            )
-            print(f"  W&B: {args.wandb_entity}/{args.wandb_project}/{run_name}")
-        except Exception as e:
-            print(f"  W&B failed ({e}); using CSVLogger")
+        from pytorch_lightning.loggers import WandbLogger
+        run_name = args.run_name or f"baseline-{tag}"
+        logtool = WandbLogger(
+            project=args.wandb_project,
+            entity=args.wandb_entity,
+            name=run_name,
+            save_dir=args.ckpt_dir,
+            log_model=False,
+            config=vars(args),
+        )
+        print(f"  W&B: {args.wandb_entity}/{args.wandb_project}/{run_name}")
 
     # ── trainer ───────────────────────────────────────────────────────────────
     callbacks = [
         TQDMProgressBar(refresh_rate=20),
-        EarlyStopping(monitor="val_mse", patience=6, mode="min", verbose=True),
+        EarlyStopping(monitor="val_skill_persistence", patience=10, mode="max", verbose=True),
         ModelCheckpoint(
             dirpath=args.ckpt_dir,
-            filename="pangu-{epoch:02d}-{val_mse:.4f}",
-            monitor="val_mse", mode="min", save_top_k=2,
+            filename="pangu-{epoch:02d}-{val_skill_persistence:.4f}",
+            monitor="val_skill_persistence", mode="max", save_top_k=2,
         ),
     ]
 
     import torch as _torch
-    precision = "16-mixed" if _torch.cuda.is_available() else "32-true"
+    # bf16 has fp32's exponent range — no GradScaler needed, no grad-norm inflation.
+    # Fall back to fp16 if the GPU doesn't support bf16 (pre-Ampere).
+    if _torch.cuda.is_available():
+        precision = "bf16-mixed" if _torch.cuda.is_bf16_supported() else "16-mixed"
+    else:
+        precision = "32-true"
 
     trainer = pl.Trainer(
         accelerator="auto", devices="auto",

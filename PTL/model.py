@@ -506,6 +506,11 @@ class Pangu(pl.LightningModule):
         ])
         
         self.patchrecovery2d = PatchRecovery2D((self.grid_size, self.grid_size), (4, 4), (1+self.time_steps) * embed_dim, 5)
+        # Zero-init output head: delta_hat = 0 at step 0 = persistence forecast.
+        # Gives positive climatology skill from epoch 1 and eliminates the large
+        # gradient contribution from random outputs over all inactive pixels.
+        nn.init.zeros_(self.patchrecovery2d.conv.weight)
+        nn.init.zeros_(self.patchrecovery2d.conv.bias)
 
         # Place more weight on observed regions/channels that better represent ionospheric structure.
         self.register_buffer("channel_weights",
@@ -537,14 +542,16 @@ class Pangu(pl.LightningModule):
     def _should_log_diag_step(self, batch_idx):
         return self.log_diagnostics and (self.diagnostics_interval > 0) and (batch_idx % self.diagnostics_interval == 0)
 
-    def on_after_backward(self):
+    def on_before_optimizer_step(self, optimizer):
+        # Fires after scaler.unscale_() in 16-mixed — grads are true fp32 values here,
+        # not the artificially inflated fp16-scaled ones seen in on_after_backward.
         if not self.log_diagnostics:
             return
         sq_norm_sum = None
         for p in self.parameters():
             if p.grad is None:
                 continue
-            g2 = p.grad.detach().pow(2).sum()
+            g2 = p.grad.detach().float().pow(2).sum()
             sq_norm_sum = g2 if sq_norm_sum is None else (sq_norm_sum + g2)
         if sq_norm_sum is not None:
             self._last_grad_norm = torch.sqrt(sq_norm_sum).detach()
@@ -876,6 +883,7 @@ class Pangu(pl.LightningModule):
         occ_weight = torch.where(y[:, 3:4] > 0.0,
                                  torch.full_like(y[:, 3:4], 4.0),
                                  torch.ones_like(y[:, 3:4]))
+        occ_weight = occ_weight.expand_as(weighted)
         return (weighted * occ_weight).sum() / occ_weight.sum()
 
     def _unpack_solar(self, batch):
@@ -1045,20 +1053,21 @@ class Pangu(pl.LightningModule):
              {'params': no_decay, 'weight_decay': 0.0}],
             lr=self.learning_rate, betas=(0.9, 0.999), eps=1e-08,
         )
-        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, mode='min', factor=0.5, patience=5
+        warmup = int(getattr(self, '_warmup_steps', 1000))
+        total_steps = self.trainer.estimated_stepping_batches
+        warmup_sched = torch.optim.lr_scheduler.LinearLR(
+            optimizer, start_factor=0.1, end_factor=1.0, total_iters=warmup
+        )
+        cosine_sched = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=max(1, total_steps - warmup), eta_min=self.learning_rate * 0.01
+        )
+        scheduler = torch.optim.lr_scheduler.SequentialLR(
+            optimizer, schedulers=[warmup_sched, cosine_sched], milestones=[warmup]
         )
         return {
             "optimizer": optimizer,
-            "lr_scheduler": {"scheduler": scheduler, "monitor": "val_mse"},
+            "lr_scheduler": {"scheduler": scheduler, "interval": "step"},
         }
 
     def on_train_batch_start(self, batch, batch_idx):
         self._batch_start_time = time.perf_counter()
-        # Linear warmup: ramp LR from 0 → learning_rate over the first warmup steps.
-        warmup = int(getattr(self, '_warmup_steps', 500))
-        step = int(self.global_step)
-        if step < warmup:
-            scale = (step + 1) / warmup
-            for pg in self.optimizers().param_groups:
-                pg['lr'] = self.learning_rate * scale
