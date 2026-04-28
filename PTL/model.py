@@ -452,10 +452,11 @@ class Pangu(pl.LightningModule):
         self._last_throughput = None
         self._lead_time_curve = None
         self._val_example = None
+        self.num_input_frames = int(kwargs.get("num_input_frames", 1))
         self.patchembed2d = PatchEmbed2D(
             img_size=(self.grid_size, self.grid_size),
             patch_size=(4, 4),
-            in_chans=5,
+            in_chans=5 * self.num_input_frames,
             embed_dim=embed_dim,
         )
         reduced_grid=(1, self.grid_size//4,self.grid_size//4)
@@ -856,11 +857,18 @@ class Pangu(pl.LightningModule):
         decoded = latent.transpose(1, 2).unflatten(2, self.reduced_grid)
         return self.patchrecovery2d(decoded)
 
+    def _predict(self, x_in, add_noise=False, solar_vec=None, solar_mask=None):
+        x = self.patchembed2d(x_in)
+        x = x.flatten(2, 3).transpose(1, 2)
+        x = self._forecast_latent(x, add_noise=add_noise, solar_vec=solar_vec, solar_mask=solar_mask)
+        # residual skip from most-recent frame only (last 5 channels when T > 1)
+        return x_in[:, -5:] + self._decode_from_latent(x)
+
     @torch._dynamo.disable
     def _lead_time_mse_curve(self, x_emb, x_in, y, solar_vec=None, solar_mask=None):
         if self.time_steps <= 1:
             lat = self._forecast_latent(x_emb, add_noise=False, solar_vec=solar_vec, solar_mask=solar_mask)
-            y_hat = x_in + self._decode_from_latent(lat)
+            y_hat = x_in[:, -5:] + self._decode_from_latent(lat)
             return [(1, float(self.metric_mse(y_hat, y).item()))]
 
         curve = []
@@ -869,7 +877,7 @@ class Pangu(pl.LightningModule):
             self.time_steps = h
             with torch.no_grad():
                 lat   = self._forecast_latent(x_emb, add_noise=False, solar_vec=solar_vec, solar_mask=solar_mask)
-                y_hat = x_in + self._decode_from_latent(lat)
+                y_hat = x_in[:, -5:] + self._decode_from_latent(lat)
                 mse   = self.metric_mse(y_hat, y)
             self.time_steps = old_steps
             curve.append((h, float(mse.item())))
@@ -903,18 +911,18 @@ class Pangu(pl.LightningModule):
         """
         solar_vec, solar_mask = self._unpack_solar(batch)
         x_in, y = batch[0], batch[-1]
-        delta_target = y - x_in
+        delta_target = y - x_in[:, -5:]
         # Random dropout of solar conditioning during training
         if self.solar_wind_dropout > 0:
             drop = (torch.rand(solar_mask.shape[0], device=solar_mask.device)
                     < self.solar_wind_dropout).float().unsqueeze(1)
             solar_mask = solar_mask * (1.0 - drop)
         x = self.patchembed2d(x_in)
-        x = x.flatten(2,3).transpose(1, 2)
+        x = x.flatten(2, 3).transpose(1, 2)
         delta_hat = self._decode_from_latent(
             self._forecast_latent(x, add_noise=True, solar_vec=solar_vec, solar_mask=solar_mask))
         loss = self._weighted_loss(delta_hat, delta_target)
-        y_hat = x_in + delta_hat
+        y_hat = x_in[:, -5:] + delta_hat
         mse = self.metric_mse(y_hat, y)
         self.log('train_loss', loss, on_epoch=True, prog_bar=True)
         self.log('train_mse', mse, on_epoch=True, prog_bar=False)
@@ -951,13 +959,12 @@ class Pangu(pl.LightningModule):
         """
         solar_vec, solar_mask = self._unpack_solar(batch)
         x_in, y = batch[0], batch[-1]
-        delta_target = y - x_in
         x = self.patchembed2d(x_in)
-        x = x.flatten(2,3).transpose(1, 2)
+        x = x.flatten(2, 3).transpose(1, 2)
         latent = self._forecast_latent(x, add_noise=False, solar_vec=solar_vec, solar_mask=solar_mask)
         delta_hat = self._decode_from_latent(latent)
-        loss = self._weighted_loss(delta_hat, delta_target)
-        y_hat = x_in + delta_hat
+        loss = self._weighted_loss(delta_hat, y - x_in[:, -5:])
+        y_hat = x_in[:, -5:] + delta_hat
         mse = self.metric_mse(y_hat, y)
 
         sq_err = (y_hat.detach() - y.detach()).pow(2)

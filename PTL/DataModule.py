@@ -696,7 +696,7 @@ class DatasetFromPresaved(Dataset):
         len (int): Length of the dataset.
     """
 
-    def __init__(self, dataA, dataB, shape):
+    def __init__(self, dataA, dataB, shape, num_input_frames=1):
         """
         Initializes the dataset.
 
@@ -704,8 +704,10 @@ class DatasetFromPresaved(Dataset):
             dataA (list): List of file paths for dataA.
             dataB (list): List of file paths for dataB.
             shape (list): Shape of the dataset.
+            num_input_frames (int): Number of consecutive input frames to stack (default 1).
         """
         self.dataA = dataA
+        self.num_input_frames = max(1, int(num_input_frames))
         self.dataB = dataB
         if shape is not None:
             self.shape = shape[-3:]
@@ -816,32 +818,42 @@ class DatasetFromPresaved(Dataset):
         file_offset = index - prev_total
         dA = np.load(self.dataA[file_index], mmap_mode='r')
         dB = np.load(self.dataB[file_index], mmap_mode='r')
+        # Can't look back past the start of a chunk without crossing a file boundary
+        if file_offset < self.num_input_frames - 1:
+            return self.__getitem__(random.randint(0, self.len - 1))
         if dA.shape[0] <= file_offset or dB.shape[0] <= file_offset:
             return self.__getitem__(random.randint(0, self.len - 1))
         try:
-            dataA = dA[file_offset, :, :, :]
-            dataB = dB[file_offset, :, :, :]
+            # Single contiguous mmap read for all T frames: (T, 5, H, W)
+            start = file_offset - (self.num_input_frames - 1)
+            raw = np.array(dA[start:file_offset + 1])
+
+            # Zero out cells not observed in every frame (ch 3 = occupancy).
+            # Broadcast (H,W) mask over (T,5,H,W) — no Python loops needed.
+            if self.num_input_frames > 1:
+                observed_everywhere = (raw[:, 3] > 0.5).all(axis=0)  # (H, W)
+                raw *= observed_everywhere.astype(raw.dtype)           # broadcast
+
+            # Normalise all frames in one tensor op; x_mean/x_std are (5,1,1)
+            # and broadcast correctly over the leading T dimension.
+            raw_t = torch.tensor(raw, dtype=torch.float32)  # (T, 5, H, W)
+            if self.x_mean is not None and self.x_std is not None:
+                raw_t = (raw_t - self.x_mean) / torch.clamp(self.x_std, min=1e-6)
+            else:
+                raw_t = raw_t / torch.clamp(
+                    torch.norm(raw_t, dim=[-1, -2], keepdim=True), min=1e-6)
+            dataA = raw_t.flatten(0, 1)  # (5*T, H, W)
+
+            dataB = torch.tensor(np.array(dB[file_offset]), dtype=torch.float32)
+            if self.y_mean is not None and self.y_std is not None:
+                dataB = (dataB - self.y_mean) / torch.clamp(self.y_std, min=1e-6)
+            else:
+                dataB = dataB / torch.clamp(
+                    torch.norm(dataB, dim=[-1, -2], keepdim=True), min=1e-6)
         except Exception as e:
             print("Error: ", e)
             self.len = self.len - 200 + dA.shape[0]
             return self.__getitem__(random.randint(0, self.len - 1))
-        if self.shape is None:
-            self.shape = list(dataA.shape)
-            self.shape[0] = -1
-        dataA = dataA.reshape(self.shape)
-        dataB = dataB.reshape(self.shape)
-        dataA = torch.tensor(dataA, dtype=torch.float32)
-        dataB = torch.tensor(dataB, dtype=torch.float32)
-        if self.x_mean is not None and self.x_std is not None:
-            dataA = (dataA - self.x_mean) / torch.clamp(self.x_std, min=1e-6)
-        else:
-            eps = 1e-6
-            dataA = dataA / torch.clamp(torch.norm(dataA, dim=[-1, -2], keepdim=True), min=eps)
-        if self.y_mean is not None and self.y_std is not None:
-            dataB = (dataB - self.y_mean) / torch.clamp(self.y_std, min=1e-6)
-        else:
-            eps = 1e-6
-            dataB = dataB / torch.clamp(torch.norm(dataB, dim=[-1, -2], keepdim=True), min=eps)
         return dataA, dataB
 
 if __name__ == "__main__":

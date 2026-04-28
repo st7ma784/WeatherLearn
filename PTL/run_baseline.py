@@ -265,15 +265,16 @@ class SolarDataset(Dataset):
 # ── data module ───────────────────────────────────────────────────────────────
 
 class PresavedDataModule(pl.LightningDataModule):
-    def __init__(self, data_dir, batch_size=8, use_solar=True):
+    def __init__(self, data_dir, batch_size=8, use_solar=True, num_input_frames=1):
         super().__init__()
-        self.data_dir   = data_dir
-        self.batch_size = batch_size
-        self.use_solar  = use_solar
+        self.data_dir         = data_dir
+        self.batch_size       = batch_size
+        self.use_solar        = use_solar
+        self.num_input_frames = num_input_frames
 
     def setup(self, stage=None):
         dataA, dataB, shape = load_dataset_from_disk(self.data_dir)
-        base = DatasetFromPresaved(dataA, dataB, shape)
+        base = DatasetFromPresaved(dataA, dataB, shape, num_input_frames=self.num_input_frames)
 
         # Normalise on a random sample of train split (fast — avoids reading all 26k items)
         n_val   = max(1, int(len(base) * 0.1))
@@ -352,6 +353,8 @@ def main():
                    help="Disable solar-wind FiLM conditioning even if IMF files exist")
     p.add_argument("--resume_from",   default=None,
                    help="Path to checkpoint to resume from (auto-detects latest if 'auto')")
+    p.add_argument("--num_input_frames", type=int, default=1,
+                   help="Number of consecutive input frames to stack (1=single snapshot, 2-3=temporal context)")
     args = p.parse_args()
     if args.max_files == 0:
         args.max_files = None
@@ -384,7 +387,8 @@ def main():
 
     # ── data module ───────────────────────────────────────────────────────────
     dm = PresavedDataModule(data_dir, batch_size=args.batch_size,
-                            use_solar=not args.no_solar)
+                            use_solar=not args.no_solar,
+                            num_input_frames=args.num_input_frames)
     dm.setup()
 
     # ── model ─────────────────────────────────────────────────────────────────
@@ -396,6 +400,7 @@ def main():
         learning_rate=args.lr,
         noise_factor=0.05,
         time_step=1,
+        num_input_frames=args.num_input_frames,
         use_ema=True,
         solar_wind_dim=dm.solar_dim,
         log_diagnostics=True,
