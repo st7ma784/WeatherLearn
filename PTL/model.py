@@ -978,7 +978,7 @@ class Pangu(pl.LightningModule):
         self._val_quiet_sse   += (sq_err * quiet_mask).sum()
         self._val_quiet_count += quiet_mask.sum()
         self._val_model_sse        += sq_err.sum()
-        self._val_baseline_sse     += (x_in.detach() - y.detach()).pow(2).sum()
+        self._val_baseline_sse     += (x_in[:, -5:].detach() - y.detach()).pow(2).sum()
         self._val_baseline_clim_sse += y.detach().pow(2).sum()
 
         # Store raw tensors for first batch; CPU transfer deferred to on_validation_end.
