@@ -787,7 +787,18 @@ class DatasetFromPresaved(Dataset):
 
             dA = np.load(self.dataA[int(file_id)], mmap_mode='r')
             dB = np.load(self.dataB[int(file_id)], mmap_mode='r')
-            batchA = np.asarray(dA[local_offsets], dtype=np.float64)
+
+            # Mirror the same temporal aggregation used in __getitem__ so that
+            # computed mean/std match the actual distribution seen during training.
+            if self.temporal_agg_frames > 1:
+                agg_list = []
+                for off in local_offsets:
+                    start = max(0, int(off) - self.temporal_agg_frames + 1)
+                    chunk = np.array(dA[start:int(off) + 1], dtype=np.float64)
+                    agg_list.append(chunk.mean(axis=0))
+                batchA = np.stack(agg_list)
+            else:
+                batchA = np.asarray(dA[local_offsets], dtype=np.float64)
             batchB = np.asarray(dB[local_offsets], dtype=np.float64)
 
             if batchA.ndim != 4 or batchB.ndim != 4:
@@ -888,6 +899,20 @@ class DatasetFromPresaved(Dataset):
                     torch.norm(raw_t, dim=[-1, -2], keepdim=True), min=1e-6)
             dataA = raw_t.flatten(0, 1)  # (5 * num_input_frames, H, W)
 
+            # Current single raw frame (not aggregated) — used as the residual base
+            # and as the true persistence forecast.  Normalize with y_mean/y_std
+            # (single-frame stats) so that x_last and y share the same scale and
+            # delta_target = y - x_last has no per-channel bias in empty cells.
+            raw_last = np.array(dA[file_offset])  # (5, H, W)
+            raw_last_t = torch.tensor(raw_last, dtype=torch.float32)
+            if self.y_mean is not None and self.y_std is not None:
+                raw_last_t = (raw_last_t - self.y_mean) / torch.clamp(self.y_std, min=1e-6)
+            elif self.x_mean is not None and self.x_std is not None:
+                raw_last_t = (raw_last_t - self.x_mean) / torch.clamp(self.x_std, min=1e-6)
+            else:
+                raw_last_t = raw_last_t / torch.clamp(
+                    torch.norm(raw_last_t, dim=[-1, -2], keepdim=True), min=1e-6)
+
             dataB = torch.tensor(np.array(dB[file_offset]), dtype=torch.float32)
             if self.y_mean is not None and self.y_std is not None:
                 dataB = (dataB - self.y_mean) / torch.clamp(self.y_std, min=1e-6)
@@ -898,7 +923,7 @@ class DatasetFromPresaved(Dataset):
             print("Error: ", e)
             self.len = self.len - 200 + dA.shape[0]
             return self.__getitem__(random.randint(0, self.len - 1))
-        return dataA, dataB
+        return dataA, raw_last_t, dataB
 
 if __name__ == "__main__":
     from minio import Minio

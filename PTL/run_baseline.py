@@ -243,10 +243,13 @@ class SolarDataset(Dataset):
         return len(self.base)
 
     def __getitem__(self, idx):
-        x, y = self.base[idx]
+        # base now returns (x_agg, x_last, y) — x_last is the single most-recent
+        # raw frame (not temporally averaged), used as residual base in the model.
+        x, x_last, y = self.base[idx]
 
         if not self._imf_avail:
             return (x,
+                    x_last,
                     torch.zeros(IMF_DIM, dtype=torch.float32),
                     torch.zeros(1,       dtype=torch.float32),
                     y)
@@ -267,6 +270,7 @@ class SolarDataset(Dataset):
                 mask     = float(np.any(raw != 0.0))
 
         return (x,
+                x_last,
                 torch.tensor(imf_norm, dtype=torch.float32),
                 torch.tensor([mask],   dtype=torch.float32),
                 y)
@@ -296,11 +300,11 @@ class PresavedDataModule(pl.LightningDataModule):
         rng = np.random.default_rng(42)
         sample_idx = rng.choice(n_train, size=min(2000, n_train), replace=False)
         stats = base.compute_stats_from_indices(sample_idx.astype(np.int64))
-        # Delta prediction requires identical normalization for x and y:
-        # delta = y_norm - x_norm must equal (y_raw - x_raw)/std exactly.
-        # Separate stats introduce a per-channel bias in every empty cell.
-        stats['y_mean'] = stats['x_mean'].copy()
-        stats['y_std']  = stats['x_std'].copy()
+        # x_mean/x_std: stats over temporally-aggregated input frames (unit-normalise x_in).
+        # y_mean/y_std: stats over single target frames (unit-normalise y and x_last).
+        # x_last and y share y_stats so delta = y - x_last has no per-channel bias in
+        # empty cells.  Do NOT override y_stats with x_stats when temporal aggregation
+        # is active — the two distributions have different variances.
         base.set_normalization_stats(stats)
 
         # Load parallel IMF files if they exist
@@ -320,8 +324,10 @@ class PresavedDataModule(pl.LightningDataModule):
 
         solar_dim = IMF_DIM if (self.use_solar and imf_files) else 0
         print(f"  train: {n_train:,}  val: {n_val:,}  solar_dim: {solar_dim}")
-        print(f"  shared mean: {stats['x_mean'].round(4)}")
-        print(f"  shared std:  {stats['x_std'].round(4)}")
+        print(f"  x_in mean (agg):  {stats['x_mean'].round(4)}")
+        print(f"  x_in std  (agg):  {stats['x_std'].round(4)}")
+        print(f"  y/x_last mean:    {stats['y_mean'].round(4)}")
+        print(f"  y/x_last std:     {stats['y_std'].round(4)}")
         self.solar_dim = solar_dim
 
     def train_dataloader(self):
