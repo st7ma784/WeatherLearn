@@ -64,6 +64,20 @@ import random
 from tqdm import tqdm
 import hashlib
 import ast
+import datetime
+
+def _record_sort_key(record):
+    try:
+        return datetime.datetime(
+            int(record.get("start.year", 2000)),
+            int(record.get("start.month", 1)),
+            int(record.get("start.day", 1)),
+            int(record.get("start.hour", 0)),
+            int(record.get("start.minute", 0)),
+        )
+    except Exception:
+        return datetime.datetime.min
+
 
 def gaussian(x, y, x0, y0, sigma_x, sigma_y):
     """
@@ -253,6 +267,8 @@ class SuperDARNDataset(IterableDataset):
             if not kwargs.get("silent", False):
                 raise e
 
+        self.min_mlat = float(kwargs.get("min_mlat", 50.0))
+        self.max_mlat = float(kwargs.get("max_mlat", 90.0))
         self.window_size = window_size
         self.method = method
         if self.method == 'flat':
@@ -298,7 +314,10 @@ class SuperDARNDataset(IterableDataset):
                 mlon = self._safe_float(mlons[i])
                 if not np.isfinite(mlat) or not np.isfinite(mlon):
                     continue
-                lat_idx = int(np.clip((mlat + 90.0) / 180.0 * (self.grid_size - 1), 0, self.grid_size - 1))
+                if mlat < self.min_mlat or mlat > self.max_mlat:
+                    continue
+                lat_range = self.max_mlat - self.min_mlat
+                lat_idx = int(np.clip((mlat - self.min_mlat) / lat_range * (self.grid_size - 1), 0, self.grid_size - 1))
                 lon_idx = int(np.clip((mlon % 360.0) / 360.0 * (self.grid_size - 1), 0, self.grid_size - 1))
                 vel_sum[lat_idx, lon_idx] += self._safe_float(vels[i])
                 vel_cnt[lat_idx, lon_idx] += 1.0
@@ -330,11 +349,16 @@ class SuperDARNDataset(IterableDataset):
     def process_data_conv(self, records):
         if not records:
             return None
+        records = sorted(records, key=_record_sort_key)
         if len(records) < 2:
             grid = self.process_conv_to_grid(records)
             tensor = torch.from_numpy(grid)
             return tensor, tensor.clone()
-        split_idx = max(1, len(records) // 2)
+        # Split at temporal midpoint so x and y represent non-overlapping time windows.
+        times = [_record_sort_key(r) for r in records]
+        t_mid = times[0] + (times[-1] - times[0]) / 2
+        split_idx = next((i for i, t in enumerate(times) if t >= t_mid), len(records) // 2)
+        split_idx = max(1, min(split_idx, len(records) - 1))
         x_grid = self.process_conv_to_grid(records[:split_idx])
         y_grid = self.process_conv_to_grid(records[split_idx:])
         if x_grid is None or y_grid is None:
@@ -445,6 +469,8 @@ class DatasetFromMinioBucket(LightningDataModule):
             "window_size": self.window_size,
             "grid_size": kwargs.get("grid_size", 300),
             "time_step": kwargs.get("time_step", 1),
+            "min_mlat": kwargs.get("min_mlat", 50.0),
+            "max_mlat": kwargs.get("max_mlat", 90.0),
         }
         self.dataset_hash = hashlib.md5(str(sorted(hash_payload.items())).encode("utf-8")).hexdigest()[:12]
 
@@ -525,7 +551,11 @@ class DatasetFromMinioBucket(LightningDataModule):
             self.dataset = SuperDARNDataset(self.minioClient, self.bucket_name, self.batch_size, self.method, self.window_size, **self.kwargs)
         else:
             if self.preProcess:
-                self.dataset = DatasetFromPresaved(*load_dataset_from_disk(os.path.join(self.data_dir, "data", str(self.dataset_hash))))
+                self.dataset = DatasetFromPresaved(
+                    *load_dataset_from_disk(os.path.join(self.data_dir, "data", str(self.dataset_hash))),
+                    num_input_frames=self.kwargs.get("num_input_frames", 1),
+                    temporal_agg_frames=self.kwargs.get("temporal_agg_frames", 1),
+                )
             else:
                 self.dataset = SuperDARNDatasetFolder(self.data_dir, self.batch_size, self.method, self.window_size, **self.kwargs)
 
@@ -696,7 +726,7 @@ class DatasetFromPresaved(Dataset):
         len (int): Length of the dataset.
     """
 
-    def __init__(self, dataA, dataB, shape, num_input_frames=1):
+    def __init__(self, dataA, dataB, shape, num_input_frames=1, temporal_agg_frames=1):
         """
         Initializes the dataset.
 
@@ -704,10 +734,12 @@ class DatasetFromPresaved(Dataset):
             dataA (list): List of file paths for dataA.
             dataB (list): List of file paths for dataB.
             shape (list): Shape of the dataset.
-            num_input_frames (int): Number of consecutive input frames to stack (default 1).
+            num_input_frames (int): Number of consecutive (aggregated) input frames to stack (default 1).
+            temporal_agg_frames (int): Consecutive raw frames averaged together to form each input frame (default 1).
         """
         self.dataA = dataA
         self.num_input_frames = max(1, int(num_input_frames))
+        self.temporal_agg_frames = max(1, int(temporal_agg_frames))
         self.dataB = dataB
         if shape is not None:
             self.shape = shape[-3:]
@@ -818,31 +850,43 @@ class DatasetFromPresaved(Dataset):
         file_offset = index - prev_total
         dA = np.load(self.dataA[file_index], mmap_mode='r')
         dB = np.load(self.dataB[file_index], mmap_mode='r')
+        total_lookback = self.num_input_frames * self.temporal_agg_frames - 1
         # Can't look back past the start of a chunk without crossing a file boundary
-        if file_offset < self.num_input_frames - 1:
+        if file_offset < total_lookback:
             return self.__getitem__(random.randint(0, self.len - 1))
         if dA.shape[0] <= file_offset or dB.shape[0] <= file_offset:
             return self.__getitem__(random.randint(0, self.len - 1))
         try:
-            # Single contiguous mmap read for all T frames: (T, 5, H, W)
-            start = file_offset - (self.num_input_frames - 1)
-            raw = np.array(dA[start:file_offset + 1])
+            # Single contiguous mmap read: (num_input_frames * temporal_agg_frames, 5, H, W)
+            start = file_offset - total_lookback
+            raw_all = np.array(dA[start:file_offset + 1])
 
-            # Zero out cells not observed in every frame (ch 3 = occupancy).
-            # Broadcast (H,W) mask over (T,5,H,W) — no Python loops needed.
+            # Temporal aggregation: average temporal_agg_frames consecutive raw frames
+            # into each input slot → (num_input_frames, 5, H, W).
+            # Mean pooling fills in cells that fire in any scan within the window.
+            if self.temporal_agg_frames > 1:
+                raw_all = raw_all.reshape(
+                    self.num_input_frames, self.temporal_agg_frames, *raw_all.shape[1:]
+                )
+                raw = raw_all.mean(axis=1)  # (num_input_frames, 5, H, W)
+            else:
+                raw = raw_all  # (num_input_frames, 5, H, W)
+
+            # Occupancy mask: keep cells observed in ANY input slot (union), not all (intersection).
+            # Intersection was zeroing out intermittently-active cells and compounding sparsity.
             if self.num_input_frames > 1:
-                observed_everywhere = (raw[:, 3] > 0.5).all(axis=0)  # (H, W)
-                raw *= observed_everywhere.astype(raw.dtype)           # broadcast
+                observed_anywhere = (raw[:, 3] > 0.5).any(axis=0)  # (H, W)
+                raw *= observed_anywhere.astype(raw.dtype)
 
             # Normalise all frames in one tensor op; x_mean/x_std are (5,1,1)
-            # and broadcast correctly over the leading T dimension.
-            raw_t = torch.tensor(raw, dtype=torch.float32)  # (T, 5, H, W)
+            # and broadcast correctly over the leading num_input_frames dimension.
+            raw_t = torch.tensor(raw, dtype=torch.float32)  # (num_input_frames, 5, H, W)
             if self.x_mean is not None and self.x_std is not None:
                 raw_t = (raw_t - self.x_mean) / torch.clamp(self.x_std, min=1e-6)
             else:
                 raw_t = raw_t / torch.clamp(
                     torch.norm(raw_t, dim=[-1, -2], keepdim=True), min=1e-6)
-            dataA = raw_t.flatten(0, 1)  # (5*T, H, W)
+            dataA = raw_t.flatten(0, 1)  # (5 * num_input_frames, H, W)
 
             dataB = torch.tensor(np.array(dB[file_offset]), dtype=torch.float32)
             if self.y_mean is not None and self.y_std is not None:

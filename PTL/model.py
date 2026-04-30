@@ -984,7 +984,7 @@ class Pangu(pl.LightningModule):
         # Store raw tensors for first batch; CPU transfer deferred to on_validation_end.
         if batch_idx == 0:
             self._val_example_tensors = (
-                x_in[0].detach(),
+                x_in[0, -5:].detach(),
                 y[0].detach(),
                 y_hat[0].detach(),
                 solar_vec[0].detach(),

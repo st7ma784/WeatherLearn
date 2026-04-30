@@ -39,8 +39,8 @@ IMF_DIM    = len(IMF_FIELDS)  # 5
 
 # ── grid conversion ───────────────────────────────────────────────────────────
 
-def record_to_grid(record, grid_size):
-    """Convert one cnvmap record → (5, G, G) float32 array."""
+def record_to_grid(record, grid_size, min_mlat=50.0, max_mlat=90.0):
+    """Convert one cnvmap record → (5, G, G) float32 array (polar projection)."""
     mlats = np.asarray(record.get("vector.mlat", []),        dtype=np.float32)
     mlons = np.asarray(record.get("vector.mlon", []),        dtype=np.float32)
     vels  = np.asarray(record.get("vector.vel.median", []),  dtype=np.float32)
@@ -51,22 +51,31 @@ def record_to_grid(record, grid_size):
     if n == 0:
         return np.zeros((5, grid_size, grid_size), dtype=np.float32)
 
+    # Filter to the polar observation band before indexing.
+    in_band = (mlats[:n] >= min_mlat) & (mlats[:n] <= max_mlat)
+    if not in_band.any():
+        return np.zeros((5, grid_size, grid_size), dtype=np.float32)
+    mlats_b = mlats[:n][in_band]
+    mlons_b = mlons[:n][in_band]
+    vels_b  = vels[:n][in_band]
+    pwrs_b  = pwrs[:n][in_band] if len(pwrs) >= n else np.zeros_like(vels_b)
+    wids_b  = wids[:n][in_band] if len(wids) >= n else np.zeros_like(vels_b)
+
     vel_sum = np.zeros((grid_size, grid_size), dtype=np.float32)
     vel_cnt = np.zeros((grid_size, grid_size), dtype=np.float32)
     pwr_sum = np.zeros((grid_size, grid_size), dtype=np.float32)
     wid_sum = np.zeros((grid_size, grid_size), dtype=np.float32)
 
+    lat_range = max_mlat - min_mlat
     lat_idx = np.clip(
-        ((mlats[:n] + 90.0) / 180.0 * (grid_size - 1)).astype(int), 0, grid_size - 1)
+        ((mlats_b - min_mlat) / lat_range * (grid_size - 1)).astype(int), 0, grid_size - 1)
     lon_idx = np.clip(
-        ((mlons[:n] % 360.0) / 360.0 * (grid_size - 1)).astype(int), 0, grid_size - 1)
+        ((mlons_b % 360.0) / 360.0 * (grid_size - 1)).astype(int), 0, grid_size - 1)
 
-    np.add.at(vel_sum, (lat_idx, lon_idx), vels[:n])
+    np.add.at(vel_sum, (lat_idx, lon_idx), vels_b)
     np.add.at(vel_cnt, (lat_idx, lon_idx), 1.0)
-    if len(pwrs) >= n:
-        np.add.at(pwr_sum, (lat_idx, lon_idx), pwrs[:n])
-    if len(wids) >= n:
-        np.add.at(wid_sum, (lat_idx, lon_idx), wids[:n])
+    np.add.at(pwr_sum, (lat_idx, lon_idx), pwrs_b)
+    np.add.at(wid_sum, (lat_idx, lon_idx), wids_b)
 
     denom     = np.maximum(vel_cnt, 1.0)
     mean_vel  = vel_sum / denom
@@ -80,7 +89,8 @@ def record_to_grid(record, grid_size):
 
 # ── preprocessing ─────────────────────────────────────────────────────────────
 
-def preprocess_to_disk(cnvmap_dir, out_dir, grid_size, max_files=None, chunk_size=200):
+def preprocess_to_disk(cnvmap_dir, out_dir, grid_size, max_files=None, chunk_size=200,
+                       min_mlat=50.0, max_mlat=90.0):
     """
     Read cnvmap files, compute consecutive-record pairs, save as
     dataA_NNN.npy / dataB_NNN.npy (same format as DatasetFromPresaved).
@@ -120,7 +130,7 @@ def preprocess_to_disk(cnvmap_dir, out_dir, grid_size, max_files=None, chunk_siz
         if len(records) < 2:
             continue
 
-        grids = [record_to_grid(r, grid_size) for r in records]
+        grids = [record_to_grid(r, grid_size, min_mlat, max_mlat) for r in records]
         imfs  = [extract_imf(r) for r in records]
 
         for i in range(len(grids) - 1):
@@ -265,16 +275,20 @@ class SolarDataset(Dataset):
 # ── data module ───────────────────────────────────────────────────────────────
 
 class PresavedDataModule(pl.LightningDataModule):
-    def __init__(self, data_dir, batch_size=8, use_solar=True, num_input_frames=1):
+    def __init__(self, data_dir, batch_size=8, use_solar=True,
+                 num_input_frames=1, temporal_agg_frames=1):
         super().__init__()
-        self.data_dir         = data_dir
-        self.batch_size       = batch_size
-        self.use_solar        = use_solar
-        self.num_input_frames = num_input_frames
+        self.data_dir            = data_dir
+        self.batch_size          = batch_size
+        self.use_solar           = use_solar
+        self.num_input_frames    = num_input_frames
+        self.temporal_agg_frames = temporal_agg_frames
 
     def setup(self, stage=None):
         dataA, dataB, shape = load_dataset_from_disk(self.data_dir)
-        base = DatasetFromPresaved(dataA, dataB, shape, num_input_frames=self.num_input_frames)
+        base = DatasetFromPresaved(dataA, dataB, shape,
+                                   num_input_frames=self.num_input_frames,
+                                   temporal_agg_frames=self.temporal_agg_frames)
 
         # Normalise on a random sample of train split (fast — avoids reading all 26k items)
         n_val   = max(1, int(len(base) * 0.1))
@@ -354,7 +368,13 @@ def main():
     p.add_argument("--resume_from",   default=None,
                    help="Path to checkpoint to resume from (auto-detects latest if 'auto')")
     p.add_argument("--num_input_frames", type=int, default=1,
-                   help="Number of consecutive input frames to stack (1=single snapshot, 2-3=temporal context)")
+                   help="Number of aggregated input slots to stack as channels")
+    p.add_argument("--temporal_agg_frames", type=int, default=1,
+                   help="Raw frames averaged together per input slot — increases density")
+    p.add_argument("--min_mlat", type=float, default=50.0,
+                   help="Minimum magnetic latitude for polar grid (degrees)")
+    p.add_argument("--max_mlat", type=float, default=90.0,
+                   help="Maximum magnetic latitude for polar grid (degrees)")
     args = p.parse_args()
     if args.max_files == 0:
         args.max_files = None
@@ -366,14 +386,15 @@ def main():
               f"mem_efficient: {torch.backends.cuda.mem_efficient_sdp_enabled()}, "
               f"math: {torch.backends.cuda.math_sdp_enabled()}")
 
-    # ── derive cache path (grid_size + file count make it unique) ─────────────
-    tag      = f"g{args.grid_size}_f{args.max_files or 'all'}"
+    # ── derive cache path — include polar bounds so different projections don't collide ──
+    tag      = f"g{args.grid_size}_f{args.max_files or 'all'}_mlat{int(args.min_mlat)}-{int(args.max_mlat)}"
     data_dir = os.path.join(args.cache_dir, tag)
 
     # ── preprocess if needed ──────────────────────────────────────────────────
     shape_file = os.path.join(data_dir, "shape.txt")
     if args.preprocess or not os.path.exists(shape_file):
-        preprocess_to_disk(args.cnvmap_dir, data_dir, args.grid_size, args.max_files)
+        preprocess_to_disk(args.cnvmap_dir, data_dir, args.grid_size, args.max_files,
+                           min_mlat=args.min_mlat, max_mlat=args.max_mlat)
     elif args.imf_only:
         extract_imf_to_disk(args.cnvmap_dir, data_dir, args.max_files)
     else:
@@ -388,7 +409,8 @@ def main():
     # ── data module ───────────────────────────────────────────────────────────
     dm = PresavedDataModule(data_dir, batch_size=args.batch_size,
                             use_solar=not args.no_solar,
-                            num_input_frames=args.num_input_frames)
+                            num_input_frames=args.num_input_frames,
+                            temporal_agg_frames=args.temporal_agg_frames)
     dm.setup()
 
     # ── model ─────────────────────────────────────────────────────────────────
