@@ -291,46 +291,94 @@ class SuperDARNDataset(IterableDataset):
         except Exception:
             return 0.0
 
-    def _records_to_grid(self, records):
+    def _records_to_grid(self, records, splat_sigma: float = 1.5):
         if not records:
             return np.zeros((5, self.grid_size, self.grid_size), dtype=np.float32)
 
-        vel_sum = np.zeros((self.grid_size, self.grid_size), dtype=np.float32)
-        vel_cnt = np.zeros((self.grid_size, self.grid_size), dtype=np.float32)
-        pwr_sum = np.zeros((self.grid_size, self.grid_size), dtype=np.float32)
-        wd_sum = np.zeros((self.grid_size, self.grid_size), dtype=np.float32)
-
+        # Collect all vectors across records into arrays for vectorised processing.
+        mlat_list, mlon_list, vel_list, pwr_list, wdt_list = [], [], [], [], []
         for record in records:
             mlats = record.get("vector.mlat", []) or []
             mlons = record.get("vector.mlon", []) or []
-            vels = record.get("vector.vel.median", []) or []
-            pwrs = record.get("vector.pwr.median", []) or []
-            wids = record.get("vector.wdt.median", []) or []
+            vels  = record.get("vector.vel.median", []) or []
+            pwrs  = record.get("vector.pwr.median", []) or []
+            wids  = record.get("vector.wdt.median", []) or []
             n = min(len(mlats), len(mlons), len(vels))
             if n == 0:
                 continue
-            for i in range(n):
-                mlat = self._safe_float(mlats[i])
-                mlon = self._safe_float(mlons[i])
-                if not np.isfinite(mlat) or not np.isfinite(mlon):
-                    continue
-                if mlat < self.min_mlat or mlat > self.max_mlat:
-                    continue
-                lat_range = self.max_mlat - self.min_mlat
-                lat_idx = int(np.clip((mlat - self.min_mlat) / lat_range * (self.grid_size - 1), 0, self.grid_size - 1))
-                lon_idx = int(np.clip((mlon % 360.0) / 360.0 * (self.grid_size - 1), 0, self.grid_size - 1))
-                vel_sum[lat_idx, lon_idx] += self._safe_float(vels[i])
-                vel_cnt[lat_idx, lon_idx] += 1.0
-                if i < len(pwrs):
-                    pwr_sum[lat_idx, lon_idx] += self._safe_float(pwrs[i])
-                if i < len(wids):
-                    wd_sum[lat_idx, lon_idx] += self._safe_float(wids[i])
+            mlat_list.extend(float(mlats[i]) for i in range(n))
+            mlon_list.extend(float(mlons[i]) for i in range(n))
+            vel_list.extend(float(vels[i]) for i in range(n))
+            pwr_list.extend(float(pwrs[i]) if i < len(pwrs) else 0.0 for i in range(n))
+            wdt_list.extend(float(wids[i]) if i < len(wids) else 0.0 for i in range(n))
 
-        mean_vel = np.divide(vel_sum, np.maximum(vel_cnt, 1.0), dtype=np.float32)
-        mean_pwr = np.divide(pwr_sum, np.maximum(vel_cnt, 1.0), dtype=np.float32)
-        mean_wdt = np.divide(wd_sum, np.maximum(vel_cnt, 1.0), dtype=np.float32)
-        occupancy = (vel_cnt > 0).astype(np.float32)
-        density = np.log1p(vel_cnt).astype(np.float32)
+        if not mlat_list:
+            return np.zeros((5, self.grid_size, self.grid_size), dtype=np.float32)
+
+        mlats = np.asarray(mlat_list, dtype=np.float32)
+        mlons = np.asarray(mlon_list, dtype=np.float32)
+        vels  = np.asarray(vel_list,  dtype=np.float32)
+        pwrs  = np.asarray(pwr_list,  dtype=np.float32)
+        wdts  = np.asarray(wdt_list,  dtype=np.float32)
+
+        # Drop out-of-range / non-finite points.
+        valid = np.isfinite(mlats) & np.isfinite(mlons) & (mlats >= self.min_mlat) & (mlats <= self.max_mlat)
+        mlats, mlons, vels, pwrs, wdts = mlats[valid], mlons[valid], vels[valid], pwrs[valid], wdts[valid]
+        if mlats.size == 0:
+            return np.zeros((5, self.grid_size, self.grid_size), dtype=np.float32)
+
+        # Azimuthal equidistant polar projection.
+        # r=0 at the magnetic pole (90°), r=1 at min_mlat; theta follows mlon.
+        # This maps the polar cap to a disc centred on the grid, matching how
+        # SuperDARN data is conventionally visualised and eliminating the
+        # longitude-stretching artefact of equirectangular projection at high lat.
+        r = (90.0 - mlats) / (90.0 - self.min_mlat)   # [0, 1]
+        theta = np.deg2rad(mlons % 360.0)               # [0, 2π]
+        half = (self.grid_size - 1) / 2.0
+        xi = np.clip(half + half * r * np.sin(theta), 0, self.grid_size - 1)
+        yi = np.clip(half - half * r * np.cos(theta), 0, self.grid_size - 1)  # N at top
+
+        vel_sum = np.zeros((self.grid_size, self.grid_size), dtype=np.float64)
+        vel_cnt = np.zeros((self.grid_size, self.grid_size), dtype=np.float64)
+        pwr_sum = np.zeros((self.grid_size, self.grid_size), dtype=np.float64)
+        wdt_sum = np.zeros((self.grid_size, self.grid_size), dtype=np.float64)
+
+        # Gaussian splat: spread each vector over a small neighbourhood so that
+        # the sparse scatter of measurement points doesn't leave the majority of
+        # grid cells empty.  splat_sigma is in pixels; a value of ~1.5 gives a
+        # kernel radius of ~4 pixels (3σ), covering a couple of grid cells in
+        # every direction without blurring structure at the resolution of the data.
+        radius = max(1, int(np.ceil(3.0 * splat_sigma)))
+        gx = np.arange(-radius, radius + 1, dtype=np.float32)
+        kernel_1d = np.exp(-0.5 * (gx / splat_sigma) ** 2)
+        kernel_2d = np.outer(kernel_1d, kernel_1d)  # (2r+1, 2r+1)
+
+        xi_int = np.round(xi).astype(np.int32)
+        yi_int = np.round(yi).astype(np.int32)
+
+        for k in range(len(mlats)):
+            cx, cy = xi_int[k], yi_int[k]
+            x0 = cx - radius;  x1 = cx + radius + 1
+            y0 = cy - radius;  y1 = cy + radius + 1
+            # Clip to grid bounds and compute matching kernel slice.
+            gx0 = max(0, -x0);  gx1 = gx0 + min(x1, self.grid_size) - max(x0, 0)
+            gy0 = max(0, -y0);  gy1 = gy0 + min(y1, self.grid_size) - max(y0, 0)
+            ax0 = max(x0, 0);   ax1 = min(x1, self.grid_size)
+            ay0 = max(y0, 0);   ay1 = min(y1, self.grid_size)
+            if ax0 >= ax1 or ay0 >= ay1:
+                continue
+            w = kernel_2d[gy0:gy1, gx0:gx1]
+            vel_sum[ay0:ay1, ax0:ax1] += w * vels[k]
+            vel_cnt[ay0:ay1, ax0:ax1] += w
+            pwr_sum[ay0:ay1, ax0:ax1] += w * pwrs[k]
+            wdt_sum[ay0:ay1, ax0:ax1] += w * wdts[k]
+
+        denom = np.maximum(vel_cnt, 1e-9)
+        mean_vel = (vel_sum / denom).astype(np.float32)
+        mean_pwr = (pwr_sum / denom).astype(np.float32)
+        mean_wdt = (wdt_sum / denom).astype(np.float32)
+        occupancy = (vel_cnt > 1e-9).astype(np.float32)
+        density   = np.log1p(vel_cnt).astype(np.float32)
 
         return np.stack([mean_vel, mean_pwr, mean_wdt, occupancy, density], axis=0).astype(np.float32)
 

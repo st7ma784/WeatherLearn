@@ -459,9 +459,10 @@ class Pangu(pl.LightningModule):
             in_chans=5 * self.num_input_frames,
             embed_dim=embed_dim,
         )
-        reduced_grid=(1, self.grid_size//4,self.grid_size//4)
+        _n_patches = math.ceil(self.grid_size / 4)
+        reduced_grid=(1, _n_patches, _n_patches)
         self.incremental_step=0
-        self.reduced_grid= (self.grid_size//4,self.grid_size//4)
+        self.reduced_grid= (_n_patches, _n_patches)
         further_reduced_grid=(1, self.grid_size//6,self.grid_size//6)
         self.layer1 =  nn.Sequential(*[
             EarthSpecificBlock(dim=embed_dim, input_resolution=reduced_grid, num_heads=num_heads[0], window_size=window_size,
@@ -664,7 +665,53 @@ class Pangu(pl.LightningModule):
     _CH_CMAPS  = ["RdBu_r",   "viridis", "twilight", "binary",   "plasma"]
     _CH_UNITS  = ["m/s",       "m/s",    "°",        "",         "log(n)"]
 
-    def _plot_channel_grid(self, x, y, y_hat, title_prefix="val", solar_info=None):
+    @staticmethod
+    def _add_polar_overlay(ax, grid_size, min_mlat=50.0,
+                           mlat_rings=(60, 70, 80), n_meridians=12):
+        """Overlay mlat latitude rings and mlon meridian lines on an imshow axis.
+
+        The azimuthal equidistant projection maps:
+          r_pixel = half * (90 - mlat) / (90 - min_mlat)
+        with the disc centre at pixel (half, half).  Inverse:
+          mlat = 90 - (r_pixel / half) * (90 - min_mlat)
+          mlon = atan2(dx, dy) in degrees  (N=top, E=right)
+        """
+        import matplotlib.patches as mpatches
+        half = (grid_size - 1) / 2.0
+
+        # Disc boundary (the min_mlat circle)
+        disc = mpatches.Circle(
+            (half, half), radius=half,
+            fill=False, edgecolor="white", linewidth=0.8, linestyle="--", alpha=0.5,
+        )
+        ax.add_patch(disc)
+
+        # Latitude rings
+        for mlat in mlat_rings:
+            r_px = half * (90.0 - mlat) / (90.0 - min_mlat)
+            ring = mpatches.Circle(
+                (half, half), radius=r_px,
+                fill=False, edgecolor="white", linewidth=0.6, linestyle=":", alpha=0.5,
+            )
+            ax.add_patch(ring)
+            # Label on the right-hand side of each ring
+            lx = half + r_px + 2
+            ly = half
+            if lx < grid_size - 2:
+                ax.text(lx, ly, f"{mlat}°", color="white", fontsize=4,
+                        va="center", ha="left", alpha=0.7)
+
+        # Meridian lines (mlon spokes)
+        angles_deg = np.linspace(0, 360, n_meridians, endpoint=False)
+        for ang in angles_deg:
+            rad = np.deg2rad(ang)
+            ex = half + half * np.sin(rad)
+            ey = half - half * np.cos(rad)
+            ax.plot([half, ex], [half, ey],
+                    color="white", linewidth=0.4, alpha=0.3)
+
+    def _plot_channel_grid(self, x, y, y_hat, title_prefix="val", solar_info=None,
+                           min_mlat=50.0):
         """
         4-row comparison panel per channel:
           Row 0 — Input (current state)
@@ -676,6 +723,7 @@ class Pangu(pl.LightningModule):
         """
         n_ch   = x.shape[0]
         n_rows = 4
+        grid_size = x.shape[-1]
         fig, axes = plt.subplots(n_rows, n_ch,
                                  figsize=(2.8 * n_ch, 2.8 * n_rows),
                                  squeeze=False)
@@ -694,7 +742,8 @@ class Pangu(pl.LightningModule):
             for row, data in enumerate([x[c], y[c], y_hat[c]]):
                 ax = axes[row, c]
                 im = ax.imshow(data, cmap=cmap, vmin=vmin, vmax=vmax,
-                               interpolation="nearest", origin="lower")
+                               interpolation="nearest", origin="upper")
+                self._add_polar_overlay(ax, grid_size, min_mlat=min_mlat)
                 ax.set_title(f"{row_labels[row]}\n{label}", fontsize=7)
                 ax.axis("off")
                 if c == n_ch - 1:
@@ -705,7 +754,8 @@ class Pangu(pl.LightningModule):
             ax_e = axes[3, c]
             im_e = ax_e.imshow(err, cmap="hot", vmin=0,
                                vmax=max(float(err.max()), 1e-6),
-                               interpolation="nearest", origin="lower")
+                               interpolation="nearest", origin="upper")
+            self._add_polar_overlay(ax_e, grid_size, min_mlat=min_mlat)
             ax_e.set_title(f"|Error|\n{label}", fontsize=7)
             ax_e.axis("off")
             if c == n_ch - 1:
@@ -725,7 +775,7 @@ class Pangu(pl.LightningModule):
         for c in range(channels):
             name = self._CH_NAMES[c] if c < len(self._CH_NAMES) else f"c{c}"
             ax   = axes[0, c]
-            im   = ax.imshow(rmse_map[c], cmap="magma", origin="lower")
+            im   = ax.imshow(rmse_map[c], cmap="magma", origin="upper")
             ax.set_title(f"RMSE\n{name}", fontsize=8)
             ax.axis("off")
             fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)

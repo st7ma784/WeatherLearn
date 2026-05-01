@@ -39,8 +39,8 @@ IMF_DIM    = len(IMF_FIELDS)  # 5
 
 # ── grid conversion ───────────────────────────────────────────────────────────
 
-def record_to_grid(record, grid_size, min_mlat=50.0, max_mlat=90.0):
-    """Convert one cnvmap record → (5, G, G) float32 array (polar projection)."""
+def record_to_grid(record, grid_size, min_mlat=50.0, max_mlat=90.0, splat_sigma=3.0):
+    """Convert one cnvmap record → (5, G, G) float32 array (polar projection + Gaussian splat)."""
     mlats = np.asarray(record.get("vector.mlat", []),        dtype=np.float32)
     mlons = np.asarray(record.get("vector.mlon", []),        dtype=np.float32)
     vels  = np.asarray(record.get("vector.vel.median", []),  dtype=np.float32)
@@ -51,7 +51,6 @@ def record_to_grid(record, grid_size, min_mlat=50.0, max_mlat=90.0):
     if n == 0:
         return np.zeros((5, grid_size, grid_size), dtype=np.float32)
 
-    # Filter to the polar observation band before indexing.
     in_band = (mlats[:n] >= min_mlat) & (mlats[:n] <= max_mlat)
     if not in_band.any():
         return np.zeros((5, grid_size, grid_size), dtype=np.float32)
@@ -61,27 +60,49 @@ def record_to_grid(record, grid_size, min_mlat=50.0, max_mlat=90.0):
     pwrs_b  = pwrs[:n][in_band] if len(pwrs) >= n else np.zeros_like(vels_b)
     wids_b  = wids[:n][in_band] if len(wids) >= n else np.zeros_like(vels_b)
 
-    vel_sum = np.zeros((grid_size, grid_size), dtype=np.float32)
-    vel_cnt = np.zeros((grid_size, grid_size), dtype=np.float32)
-    pwr_sum = np.zeros((grid_size, grid_size), dtype=np.float32)
-    wid_sum = np.zeros((grid_size, grid_size), dtype=np.float32)
+    vel_sum = np.zeros((grid_size, grid_size), dtype=np.float64)
+    vel_cnt = np.zeros((grid_size, grid_size), dtype=np.float64)
+    pwr_sum = np.zeros((grid_size, grid_size), dtype=np.float64)
+    wid_sum = np.zeros((grid_size, grid_size), dtype=np.float64)
 
-    lat_range = max_mlat - min_mlat
-    lat_idx = np.clip(
-        ((mlats_b - min_mlat) / lat_range * (grid_size - 1)).astype(int), 0, grid_size - 1)
-    lon_idx = np.clip(
-        ((mlons_b % 360.0) / 360.0 * (grid_size - 1)).astype(int), 0, grid_size - 1)
+    # Azimuthal equidistant polar projection: r=0 at pole, r=1 at min_mlat.
+    half  = (grid_size - 1) / 2.0
+    r     = (90.0 - mlats_b) / (90.0 - min_mlat)
+    theta = np.deg2rad(mlons_b % 360.0)
+    xi = np.clip(half + half * r * np.sin(theta), 0, grid_size - 1)
+    yi = np.clip(half - half * r * np.cos(theta), 0, grid_size - 1)
 
-    np.add.at(vel_sum, (lat_idx, lon_idx), vels_b)
-    np.add.at(vel_cnt, (lat_idx, lon_idx), 1.0)
-    np.add.at(pwr_sum, (lat_idx, lon_idx), pwrs_b)
-    np.add.at(wid_sum, (lat_idx, lon_idx), wids_b)
+    # Gaussian splat: spread each vector over a neighbourhood so that the sparse
+    # scatter of measurement points doesn't leave most grid cells empty.
+    radius = max(1, int(np.ceil(3.0 * splat_sigma)))
+    gx = np.arange(-radius, radius + 1, dtype=np.float32)
+    kernel_1d = np.exp(-0.5 * (gx / splat_sigma) ** 2)
+    kernel_2d = np.outer(kernel_1d, kernel_1d)
 
-    denom     = np.maximum(vel_cnt, 1.0)
-    mean_vel  = vel_sum / denom
-    mean_pwr  = pwr_sum / denom
-    mean_wdt  = wid_sum / denom
-    occupancy = (vel_cnt > 0).astype(np.float32)
+    xi_int = np.round(xi).astype(np.int32)
+    yi_int = np.round(yi).astype(np.int32)
+
+    for k in range(len(mlats_b)):
+        cx, cy = xi_int[k], yi_int[k]
+        x0 = cx - radius;  x1 = cx + radius + 1
+        y0 = cy - radius;  y1 = cy + radius + 1
+        gx0 = max(0, -x0);  gx1 = gx0 + min(x1, grid_size) - max(x0, 0)
+        gy0 = max(0, -y0);  gy1 = gy0 + min(y1, grid_size) - max(y0, 0)
+        ax0 = max(x0, 0);   ax1 = min(x1, grid_size)
+        ay0 = max(y0, 0);   ay1 = min(y1, grid_size)
+        if ax0 >= ax1 or ay0 >= ay1:
+            continue
+        w = kernel_2d[gy0:gy1, gx0:gx1]
+        vel_sum[ay0:ay1, ax0:ax1] += w * vels_b[k]
+        vel_cnt[ay0:ay1, ax0:ax1] += w
+        pwr_sum[ay0:ay1, ax0:ax1] += w * pwrs_b[k]
+        wid_sum[ay0:ay1, ax0:ax1] += w * wids_b[k]
+
+    denom     = np.maximum(vel_cnt, 1e-9)
+    mean_vel  = (vel_sum / denom).astype(np.float32)
+    mean_pwr  = (pwr_sum / denom).astype(np.float32)
+    mean_wdt  = (wid_sum / denom).astype(np.float32)
+    occupancy = (vel_cnt > 1e-9).astype(np.float32)
     density   = np.log1p(vel_cnt).astype(np.float32)
 
     return np.stack([mean_vel, mean_pwr, mean_wdt, occupancy, density], axis=0)
