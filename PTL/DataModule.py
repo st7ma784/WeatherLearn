@@ -2,10 +2,40 @@
 DataModule Module
 =================
 
-This module defines data handling classes and functions for processing SuperDARN radar data. It provides tools 
-for loading, preprocessing, and managing datasets from MinIO buckets or disk storage. The module supports both 
-flat and grid-based data representations and includes functionality for caching datasets and saving/loading 
+This module defines data handling classes and functions for processing SuperDARN radar data. It provides tools
+for loading, preprocessing, and managing datasets from MinIO buckets or disk storage. The module supports both
+flat and grid-based data representations and includes functionality for caching datasets and saving/loading
 preprocessed data.
+
+Five-channel representation
+----------------------------
+
+Each grid frame is a ``(5, H, W)`` float32 array on an azimuthal-equidistant polar projection
+centred on the magnetic pole.  Channels:
+
+  0. **obs_vel_north** — SH-fitted northward E×B drift in radar-covered cells (m/s).
+     Equal to ``model_vel_north`` where ``soft_occ > 0.05``; zero elsewhere.
+  1. **obs_vel_east** — SH-fitted eastward E×B drift in radar-covered cells (m/s).
+     Equal to ``model_vel_east`` where ``soft_occ > 0.05``; zero elsewhere.
+  2. **model_vel_north** — northward drift from the background statistical convection
+     model (Weimer / TS96) stored in the convmap file.  Available across the full
+     polar cap, including cells not covered by radar.
+  3. **model_vel_east** — eastward drift from the background model (m/s).
+  4. **soft_occ** — soft observational coverage: ``tanh(splat_weight / median_weight)``,
+     smoothly in [0, 1].  Near 1 where radars densely constrain the fit; near 0
+     in model-only regions.  Replaces the old hard binary occupancy channel, which
+     caused large frame-to-frame loss spikes at moving observation boundaries.
+  5. **boundary_dist** — signed magnetic-latitude distance from the Heppner-Maynard
+     convection boundary (degrees).  Positive inside the convection zone (poleward
+     of the boundary), negative equatorward.  Interpolated from the ``boundary.mlat``
+     / ``boundary.mlon`` arrays stored in each convmap record.
+
+Using Cartesian (north/east) velocity components instead of (magnitude, azimuth)
+eliminates the 0°/360° wraparound problem for the neural network and lets it learn
+linear superposition of convection patterns directly.
+
+The background model channels give the network a physics-based prior for unobserved
+regions, addressing the core problem of sparse and shifting radar coverage.
 
 Key Features
 ------------
@@ -17,7 +47,7 @@ Key Features
   - `DatasetFromPresaved`: Handles preprocessed datasets saved on disk.
 
 - **Preprocessing and Caching**:
-  - Supports preprocessing of radar data into flat or grid-based representations.
+  - Supports preprocessing of radar data into the 5-channel polar grid representation.
   - Provides functionality for saving datasets to disk and loading them for reuse.
 
 - **Utility Functions**:
@@ -292,95 +322,174 @@ class SuperDARNDataset(IterableDataset):
             return 0.0
 
     def _records_to_grid(self, records, splat_sigma: float = 1.5):
-        if not records:
-            return np.zeros((5, self.grid_size, self.grid_size), dtype=np.float32)
+        """
+        Convert a list of cnvmap records into a (6, H, W) float32 grid.
 
-        # Collect all vectors across records into arrays for vectorised processing.
-        mlat_list, mlon_list, vel_list, pwr_list, wdt_list = [], [], [], [], []
+        Channels
+        --------
+        0  obs_vel_north  — SH-fitted northward E×B drift in radar-covered cells (m/s),
+                            zero where no observations exist.
+        1  obs_vel_east   — SH-fitted eastward E×B drift in radar-covered cells (m/s),
+                            zero where no observations exist.
+        2  model_vel_north — background-model northward drift (Weimer/TS96), m/s
+        3  model_vel_east  — background-model eastward drift, m/s
+        4  soft_occ        — tanh(obs_splat_weight / median_weight), in [0, 1]
+        5  boundary_dist   — signed mlat distance from the Heppner-Maynard boundary
+                             (degrees); positive inside convection zone, negative outside
+
+        NOTE on obs channels: vector.kvect in cnvmap files is the radar BEAM AZIMUTH
+        (direction from the measurement toward the radar), not the plasma flow direction.
+        Computing v_LOS * cos(beam_azimuth) gives the LOS velocity projected onto
+        geographic axes — not the true 2D E×B drift.  Instead, obs channels are derived
+        from the SH-fitted model velocity (model.*), which uses model.kvect as the
+        true flow azimuth, masked to radar-covered cells via soft_occ.  This ensures
+        obs and model channels represent the same physical quantity (E×B drift) and
+        differ only in spatial coverage.
+        """
+        if not records:
+            return np.zeros((6, self.grid_size, self.grid_size), dtype=np.float32)
+
+        obs_mlat, obs_mlon = [], []
+        mod_mlat, mod_mlon, mod_vn, mod_ve = [], [], [], []
+        bnd_mlat, bnd_mlon = [], []
+
         for record in records:
+            # Observed radar locations — used only for coverage (soft_occ), not velocity.
+            # vector.kvect is the beam azimuth; vel.median is the LOS velocity.
+            # Decomposing LOS with beam azimuth gives a beam-direction-dependent
+            # projection, not the true 2D E×B velocity.  Velocity comes from model.*.
             mlats = record.get("vector.mlat", []) or []
             mlons = record.get("vector.mlon", []) or []
-            vels  = record.get("vector.vel.median", []) or []
-            pwrs  = record.get("vector.pwr.median", []) or []
-            wids  = record.get("vector.wdt.median", []) or []
-            n = min(len(mlats), len(mlons), len(vels))
-            if n == 0:
-                continue
-            mlat_list.extend(float(mlats[i]) for i in range(n))
-            mlon_list.extend(float(mlons[i]) for i in range(n))
-            vel_list.extend(float(vels[i]) for i in range(n))
-            pwr_list.extend(float(pwrs[i]) if i < len(pwrs) else 0.0 for i in range(n))
-            wdt_list.extend(float(wids[i]) if i < len(wids) else 0.0 for i in range(n))
+            n = min(len(mlats), len(mlons))
+            if n > 0:
+                obs_mlat.extend(float(mlats[i]) for i in range(n))
+                obs_mlon.extend(float(mlons[i]) for i in range(n))
 
-        if not mlat_list:
-            return np.zeros((5, self.grid_size, self.grid_size), dtype=np.float32)
+            # Background statistical model vectors (Weimer / TS96) — full polar cap.
+            # model.kvect IS the plasma flow azimuth from the SH fit.
+            m_mlats  = record.get("model.mlat", []) or []
+            m_mlons  = record.get("model.mlon", []) or []
+            m_vels   = record.get("model.vel.median", []) or []
+            m_kvects = record.get("model.kvect", []) or []
+            nm = min(len(m_mlats), len(m_mlons), len(m_vels))
+            if nm > 0:
+                mod_mlat.extend(float(m_mlats[i]) for i in range(nm))
+                mod_mlon.extend(float(m_mlons[i]) for i in range(nm))
+                for i in range(nm):
+                    kv = np.deg2rad(float(m_kvects[i]) if i < len(m_kvects) else 0.0)
+                    v  = float(m_vels[i])
+                    mod_vn.append(v * np.cos(kv))
+                    mod_ve.append(v * np.sin(kv))
 
-        mlats = np.asarray(mlat_list, dtype=np.float32)
-        mlons = np.asarray(mlon_list, dtype=np.float32)
-        vels  = np.asarray(vel_list,  dtype=np.float32)
-        pwrs  = np.asarray(pwr_list,  dtype=np.float32)
-        wdts  = np.asarray(wdt_list,  dtype=np.float32)
+            # Heppner-Maynard convection boundary
+            b_mlats = record.get("boundary.mlat", []) or []
+            b_mlons = record.get("boundary.mlon", []) or []
+            nb = min(len(b_mlats), len(b_mlons))
+            if nb > 0:
+                bnd_mlat.extend(float(b_mlats[i]) for i in range(nb))
+                bnd_mlon.extend(float(b_mlons[i]) for i in range(nb))
 
-        # Drop out-of-range / non-finite points.
-        valid = np.isfinite(mlats) & np.isfinite(mlons) & (mlats >= self.min_mlat) & (mlats <= self.max_mlat)
-        mlats, mlons, vels, pwrs, wdts = mlats[valid], mlons[valid], vels[valid], pwrs[valid], wdts[valid]
-        if mlats.size == 0:
-            return np.zeros((5, self.grid_size, self.grid_size), dtype=np.float32)
+        def _splat(mlat_list, mlon_list, vn_list, ve_list):
+            """Project and Gaussian-splat velocity components onto the polar grid.
 
-        # Azimuthal equidistant polar projection.
-        # r=0 at the magnetic pole (90°), r=1 at min_mlat; theta follows mlon.
-        # This maps the polar cap to a disc centred on the grid, matching how
-        # SuperDARN data is conventionally visualised and eliminating the
-        # longitude-stretching artefact of equirectangular projection at high lat.
-        r = (90.0 - mlats) / (90.0 - self.min_mlat)   # [0, 1]
-        theta = np.deg2rad(mlons % 360.0)               # [0, 2π]
+            Returns (vn_grid, ve_grid, cnt_grid) where cnt_grid is the raw splat
+            weight accumulator (used to derive soft_occ from observed vectors).
+            """
+            z = np.zeros((self.grid_size, self.grid_size), dtype=np.float32)
+            if not mlat_list:
+                return z, z.copy(), np.zeros((self.grid_size, self.grid_size), dtype=np.float64)
+
+            mlats = np.asarray(mlat_list, dtype=np.float32)
+            mlons = np.asarray(mlon_list, dtype=np.float32)
+            vns   = np.asarray(vn_list,   dtype=np.float32)
+            ves   = np.asarray(ve_list,   dtype=np.float32)
+
+            valid = (np.isfinite(mlats) & np.isfinite(mlons)
+                     & (mlats >= self.min_mlat) & (mlats <= self.max_mlat))
+            mlats, mlons, vns, ves = mlats[valid], mlons[valid], vns[valid], ves[valid]
+            if mlats.size == 0:
+                return z, z.copy(), np.zeros((self.grid_size, self.grid_size), dtype=np.float64)
+
+            # Azimuthal equidistant polar projection: r=0 at pole, r=1 at min_mlat.
+            half  = (self.grid_size - 1) / 2.0
+            r     = (90.0 - mlats) / (90.0 - self.min_mlat)
+            theta = np.deg2rad(mlons % 360.0)
+            xi = np.clip(half + half * r * np.sin(theta), 0, self.grid_size - 1)
+            yi = np.clip(half - half * r * np.cos(theta), 0, self.grid_size - 1)
+
+            vn_sum = np.zeros((self.grid_size, self.grid_size), dtype=np.float64)
+            ve_sum = np.zeros((self.grid_size, self.grid_size), dtype=np.float64)
+            cnt    = np.zeros((self.grid_size, self.grid_size), dtype=np.float64)
+
+            radius    = max(1, int(np.ceil(3.0 * splat_sigma)))
+            gx_arr    = np.arange(-radius, radius + 1, dtype=np.float32)
+            k1d       = np.exp(-0.5 * (gx_arr / splat_sigma) ** 2)
+            kernel_2d = np.outer(k1d, k1d)
+            xi_int    = np.round(xi).astype(np.int32)
+            yi_int    = np.round(yi).astype(np.int32)
+
+            for k in range(len(mlats)):
+                cx, cy = xi_int[k], yi_int[k]
+                x0 = cx - radius;  x1 = cx + radius + 1
+                y0 = cy - radius;  y1 = cy + radius + 1
+                gx0 = max(0, -x0);  gx1 = gx0 + min(x1, self.grid_size) - max(x0, 0)
+                gy0 = max(0, -y0);  gy1 = gy0 + min(y1, self.grid_size) - max(y0, 0)
+                ax0 = max(x0, 0);   ax1 = min(x1, self.grid_size)
+                ay0 = max(y0, 0);   ay1 = min(y1, self.grid_size)
+                if ax0 >= ax1 or ay0 >= ay1:
+                    continue
+                w = kernel_2d[gy0:gy1, gx0:gx1]
+                vn_sum[ay0:ay1, ax0:ax1] += w * vns[k]
+                ve_sum[ay0:ay1, ax0:ax1] += w * ves[k]
+                cnt[ay0:ay1, ax0:ax1]    += w
+
+            denom = np.maximum(cnt, 1e-9)
+            return (vn_sum / denom).astype(np.float32), (ve_sum / denom).astype(np.float32), cnt
+
+        # Splat obs locations with unit weight to get the coverage accumulator.
+        ones = [1.0] * len(obs_mlat)
+        _, _, obs_cnt = _splat(obs_mlat, obs_mlon, ones, ones)
+        mod_vn_grid, mod_ve_grid, _ = _splat(mod_mlat, mod_mlon, mod_vn, mod_ve)
+
+        # Soft occupancy from observed locations — tells the model which cells
+        # are radar-constrained vs. model-only.
+        median_occ = float(np.median(obs_cnt[obs_cnt > 1e-9])) if (obs_cnt > 1e-9).any() else 1.0
+        soft_occ   = np.tanh(obs_cnt / max(median_occ, 1e-9)).astype(np.float32)
+
+        # Obs velocity channels: the SH-fitted model velocity masked to radar-covered
+        # cells.  Zero in unobserved regions; model velocity (correctly decomposed from
+        # model.kvect = flow azimuth) in covered regions.
+        occ_mask    = (soft_occ > 0.05).astype(np.float32)
+        obs_vn_grid = mod_vn_grid * occ_mask
+        obs_ve_grid = mod_ve_grid * occ_mask
+
+        # Signed distance from the Heppner-Maynard convection boundary.
+        # Each pixel's (mlat, mlon) is recovered from the inverse azimuthal
+        # equidistant projection; boundary mlat is then interpolated at each
+        # pixel's mlon.  Positive = inside convection zone; negative = outside.
         half = (self.grid_size - 1) / 2.0
-        xi = np.clip(half + half * r * np.sin(theta), 0, self.grid_size - 1)
-        yi = np.clip(half - half * r * np.cos(theta), 0, self.grid_size - 1)  # N at top
+        xi_g, yi_g = np.meshgrid(np.arange(self.grid_size), np.arange(self.grid_size))
+        dx = (xi_g - half) / half
+        dy = (half - yi_g) / half          # north at top
+        pixel_mlat = (90.0 - np.sqrt(dx**2 + dy**2) * (90.0 - self.min_mlat)).astype(np.float32)
+        pixel_mlon = (np.rad2deg(np.arctan2(dx, dy)) % 360.0).astype(np.float32)
 
-        vel_sum = np.zeros((self.grid_size, self.grid_size), dtype=np.float64)
-        vel_cnt = np.zeros((self.grid_size, self.grid_size), dtype=np.float64)
-        pwr_sum = np.zeros((self.grid_size, self.grid_size), dtype=np.float64)
-        wdt_sum = np.zeros((self.grid_size, self.grid_size), dtype=np.float64)
+        if bnd_mlat:
+            bnd_mlat_arr = np.asarray(bnd_mlat, dtype=np.float32)
+            bnd_mlon_arr = (np.asarray(bnd_mlon, dtype=np.float32)) % 360.0
+            sort_idx     = np.argsort(bnd_mlon_arr)
+            bnd_mlon_s   = bnd_mlon_arr[sort_idx]
+            bnd_mlat_s   = bnd_mlat_arr[sort_idx]
+            # Wrap ±360° so np.interp covers the full [0, 360) query range
+            mlon_w = np.concatenate([bnd_mlon_s - 360, bnd_mlon_s, bnd_mlon_s + 360])
+            mlat_w = np.concatenate([bnd_mlat_s,        bnd_mlat_s, bnd_mlat_s])
+            bnd_interp    = np.interp(pixel_mlon.ravel(), mlon_w, mlat_w).reshape(self.grid_size, self.grid_size)
+            boundary_dist = (pixel_mlat - bnd_interp).astype(np.float32)
+        else:
+            boundary_dist = np.zeros((self.grid_size, self.grid_size), dtype=np.float32)
 
-        # Gaussian splat: spread each vector over a small neighbourhood so that
-        # the sparse scatter of measurement points doesn't leave the majority of
-        # grid cells empty.  splat_sigma is in pixels; a value of ~1.5 gives a
-        # kernel radius of ~4 pixels (3σ), covering a couple of grid cells in
-        # every direction without blurring structure at the resolution of the data.
-        radius = max(1, int(np.ceil(3.0 * splat_sigma)))
-        gx = np.arange(-radius, radius + 1, dtype=np.float32)
-        kernel_1d = np.exp(-0.5 * (gx / splat_sigma) ** 2)
-        kernel_2d = np.outer(kernel_1d, kernel_1d)  # (2r+1, 2r+1)
-
-        xi_int = np.round(xi).astype(np.int32)
-        yi_int = np.round(yi).astype(np.int32)
-
-        for k in range(len(mlats)):
-            cx, cy = xi_int[k], yi_int[k]
-            x0 = cx - radius;  x1 = cx + radius + 1
-            y0 = cy - radius;  y1 = cy + radius + 1
-            # Clip to grid bounds and compute matching kernel slice.
-            gx0 = max(0, -x0);  gx1 = gx0 + min(x1, self.grid_size) - max(x0, 0)
-            gy0 = max(0, -y0);  gy1 = gy0 + min(y1, self.grid_size) - max(y0, 0)
-            ax0 = max(x0, 0);   ax1 = min(x1, self.grid_size)
-            ay0 = max(y0, 0);   ay1 = min(y1, self.grid_size)
-            if ax0 >= ax1 or ay0 >= ay1:
-                continue
-            w = kernel_2d[gy0:gy1, gx0:gx1]
-            vel_sum[ay0:ay1, ax0:ax1] += w * vels[k]
-            vel_cnt[ay0:ay1, ax0:ax1] += w
-            pwr_sum[ay0:ay1, ax0:ax1] += w * pwrs[k]
-            wdt_sum[ay0:ay1, ax0:ax1] += w * wdts[k]
-
-        denom = np.maximum(vel_cnt, 1e-9)
-        mean_vel = (vel_sum / denom).astype(np.float32)
-        mean_pwr = (pwr_sum / denom).astype(np.float32)
-        mean_wdt = (wdt_sum / denom).astype(np.float32)
-        occupancy = (vel_cnt > 1e-9).astype(np.float32)
-        density   = np.log1p(vel_cnt).astype(np.float32)
-
-        return np.stack([mean_vel, mean_pwr, mean_wdt, occupancy, density], axis=0).astype(np.float32)
+        return np.stack([obs_vn_grid, obs_ve_grid, mod_vn_grid, mod_ve_grid,
+                         soft_occ, boundary_dist], axis=0)
 
     def process_conv_to_grid(self, records):
         return self._records_to_grid(records)
@@ -389,10 +498,10 @@ class SuperDARNDataset(IterableDataset):
         return self._records_to_grid(records)
 
     def process_conv_to_flat(self, records):
-        return self.process_conv_to_grid(records).reshape(5, -1)
+        return self.process_conv_to_grid(records).reshape(6, -1)
 
     def process_fitacf_to_flat(self, records):
-        return self.process_fitacf_to_grid(records).reshape(5, -1)
+        return self.process_fitacf_to_grid(records).reshape(6, -1)
 
     def process_data_conv(self, records):
         if not records:
@@ -814,7 +923,7 @@ class DatasetFromPresaved(Dataset):
 
     def compute_stats_from_indices(self, indices):
         if len(indices) == 0:
-            channels = int(self.shape[0]) if self.shape is not None else 5
+            channels = int(self.shape[0]) if self.shape is not None else 6
             zeros = np.zeros((channels,), dtype=np.float32)
             ones = np.ones((channels,), dtype=np.float32)
             return {"x_mean": zeros, "x_std": ones, "y_mean": zeros, "y_std": ones}
@@ -865,7 +974,7 @@ class DatasetFromPresaved(Dataset):
             count += int(batchA.shape[0] * batchA.shape[2] * batchA.shape[3])
 
         if count == 0:
-            channels = int(self.shape[0]) if self.shape is not None else 5
+            channels = int(self.shape[0]) if self.shape is not None else 6
             zeros = np.zeros((channels,), dtype=np.float32)
             ones = np.ones((channels,), dtype=np.float32)
             return {"x_mean": zeros, "x_std": ones, "y_mean": zeros, "y_std": ones}
@@ -934,7 +1043,7 @@ class DatasetFromPresaved(Dataset):
             # Occupancy mask: keep cells observed in ANY input slot (union), not all (intersection).
             # Intersection was zeroing out intermittently-active cells and compounding sparsity.
             if self.num_input_frames > 1:
-                observed_anywhere = (raw[:, 3] > 0.5).any(axis=0)  # (H, W)
+                observed_anywhere = (raw[:, 4] > 0.5).any(axis=0)  # (H, W) — channel 4 is soft_occ
                 raw *= observed_anywhere.astype(raw.dtype)
 
             # Normalise all frames in one tensor op; x_mean/x_std are (5,1,1)

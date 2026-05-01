@@ -415,7 +415,25 @@ class FiLMLayer(nn.Module):
 
 class Pangu(pl.LightningModule):
     """
-    Pangu: A PyTorch implementation of the Pangu-Weather model.
+    Pangu: ionospheric convection forecaster based on the Pangu-Weather architecture.
+
+    Input/output channels (5 total)
+    ---------------------------------
+    Ch  Name              Source
+    0   obs_vel_north     Observed E×B northward drift  (vel.median * cos kvect), m/s
+    1   obs_vel_east      Observed E×B eastward drift   (vel.median * sin kvect), m/s
+    2   model_vel_north   Background-model northward drift (Weimer/TS96), m/s
+    3   model_vel_east    Background-model eastward drift, m/s
+    4   soft_occ          Radar coverage confidence: tanh(obs_weight / median), [0, 1]
+    5   boundary_dist     Signed mlat distance from the Heppner-Maynard boundary (°);
+                          positive inside the convection zone, negative outside
+
+    Channels 0-1 are zero in unobserved cells; channels 2-5 cover the full polar cap.
+    The loss masks channels 0-1 to observed cells only so empty-space boundary shifts
+    do not dominate training.  Channels 2-5 are always supervised.
+
+    Optional FiLM conditioning is applied at each encoder/decoder stage using a
+    solar-wind vector (IMF Bx, By, Bz, Kp, Vx, pot.drop).
 
     Args:
         embed_dim (int): Patch embedding dimension. Default: 128.
@@ -456,7 +474,7 @@ class Pangu(pl.LightningModule):
         self.patchembed2d = PatchEmbed2D(
             img_size=(self.grid_size, self.grid_size),
             patch_size=(4, 4),
-            in_chans=5 * self.num_input_frames,
+            in_chans=6 * self.num_input_frames,
             embed_dim=embed_dim,
         )
         _n_patches = math.ceil(self.grid_size / 4)
@@ -507,16 +525,20 @@ class Pangu(pl.LightningModule):
             for i in range(2)
         ])
         
-        self.patchrecovery2d = PatchRecovery2D((self.grid_size, self.grid_size), (4, 4), (1+self.time_steps) * embed_dim, 5)
+        self.patchrecovery2d = PatchRecovery2D((self.grid_size, self.grid_size), (4, 4), (1+self.time_steps) * embed_dim, 6)
         # Zero-init output head: delta_hat = 0 at step 0 = persistence forecast.
         # Gives positive climatology skill from epoch 1 and eliminates the large
         # gradient contribution from random outputs over all inactive pixels.
         nn.init.zeros_(self.patchrecovery2d.conv.weight)
         nn.init.zeros_(self.patchrecovery2d.conv.bias)
 
-        # Place more weight on observed regions/channels that better represent ionospheric structure.
+        # Observed velocity components are the primary science target.
+        # Background model channels are auxiliary (lower fidelity than observations).
+        # Soft occupancy is structural — kept low so it doesn't dominate.
+        # Boundary distance gets meaningful weight: the boundary's position and
+        # migration encode storm-time driving and should be predicted accurately.
         self.register_buffer("channel_weights",
-            torch.tensor([1.2, 1.0, 1.0, 1.5, 1.1], dtype=torch.float32).view(1, -1, 1, 1))
+            torch.tensor([1.5, 1.5, 1.0, 1.0, 0.3, 1.2], dtype=torch.float32).view(1, -1, 1, 1))
 
         # ── Optional FiLM solar-wind conditioning ────────────────────────────
         # solar_wind_dim=0 disables conditioning entirely (no extra parameters).
@@ -631,7 +653,7 @@ class Pangu(pl.LightningModule):
 
     def on_validation_epoch_start(self):
         dev = self.device
-        self._val_sse_map         = torch.zeros(5, self.grid_size, self.grid_size, device=dev)
+        self._val_sse_map         = torch.zeros(6, self.grid_size, self.grid_size, device=dev)
         self._val_count           = 0
         # Tensor accumulators — no .item() / GPU sync per batch.
         self._val_event_sse       = torch.zeros(1, device=dev)
@@ -661,9 +683,9 @@ class Pangu(pl.LightningModule):
 
     # ── visualisation helpers ────────────────────────────────────────────────
 
-    _CH_NAMES  = ["Velocity", "Vel.SD", "Kvect", "Occupancy", "Density"]
-    _CH_CMAPS  = ["RdBu_r",   "viridis", "twilight", "binary",   "plasma"]
-    _CH_UNITS  = ["m/s",       "m/s",    "°",        "",         "log(n)"]
+    _CH_NAMES  = ["Obs.Vn",  "Obs.Ve",  "Mod.Vn",  "Mod.Ve",  "Soft.Occ", "Bnd.Dist"]
+    _CH_CMAPS  = ["RdBu_r",  "RdBu_r",  "RdBu_r",  "RdBu_r",  "viridis",  "RdBu_r"]
+    _CH_UNITS  = ["m/s",     "m/s",     "m/s",     "m/s",     "",         "°mlat"]
 
     @staticmethod
     def _add_polar_overlay(ax, grid_size, min_mlat=50.0,
@@ -909,7 +931,7 @@ class Pangu(pl.LightningModule):
 
     def _predict(self, x_in, x_last=None, add_noise=False, solar_vec=None, solar_mask=None):
         if x_last is None:
-            x_last = x_in[:, -5:]
+            x_last = x_in[:, -6:]
         x = self.patchembed2d(x_in)
         x = x.flatten(2, 3).transpose(1, 2)
         x = self._forecast_latent(x, add_noise=add_noise, solar_vec=solar_vec, solar_mask=solar_mask)
@@ -935,15 +957,19 @@ class Pangu(pl.LightningModule):
         return curve
 
     def _weighted_loss(self, y_hat, y):
-        error = F.smooth_l1_loss(y_hat, y, reduction='none', beta=0.1)
-        weighted = error * self.channel_weights
-        # After z-score normalisation, active cells (raw occ=1) have y[:,3]>0;
-        # inactive cells (raw occ=0) have y[:,3]<0.
-        occ_weight = torch.where(y[:, 3:4] > 0.0,
-                                 torch.full_like(y[:, 3:4], 4.0),
-                                 torch.ones_like(y[:, 3:4]))
-        occ_weight = occ_weight.expand_as(weighted)
-        return (weighted * occ_weight).sum() / occ_weight.sum()
+        error    = F.smooth_l1_loss(y_hat, y, reduction='none', beta=0.1)
+        weighted = error * self.channel_weights  # (B, 5, H, W)
+
+        # Channel layout: [obs_vn, obs_ve, mod_vn, mod_ve, soft_occ]
+        # Observed velocity channels (0-1): only supervise radar-covered cells so that
+        # empty-region boundary shifts don't dominate the gradient.
+        # Background model + soft_occ (2-4): always supervise — the model covers the
+        # full polar cap and should be predicted everywhere.
+        occ_mask   = (y[:, 4:5] > 0.1).float()                        # (B, 1, H, W)
+        obs_weight = occ_mask.expand_as(weighted[:, :2])               # (B, 2, H, W)
+        bg_weight  = torch.ones_like(weighted[:, 2:])                  # (B, 3, H, W)
+        all_weight = torch.cat([obs_weight, bg_weight], dim=1)         # (B, 5, H, W)
+        return (weighted * all_weight).sum() / all_weight.sum().clamp(min=1.0)
 
     def _unpack_solar(self, batch):
         """Extract solar wind vector and availability mask from a (x, x_last, sv, sm, y) batch."""
@@ -1025,7 +1051,7 @@ class Pangu(pl.LightningModule):
         self._val_sse_map += sq_err.sum(dim=0)
         self._val_count += y.shape[0]
 
-        occ_mask   = (y[:, 3:4].abs() > 0.05).expand_as(sq_err)
+        occ_mask   = (y[:, 4:5] > 0.1).expand_as(sq_err)
         quiet_mask = ~occ_mask
         self._val_event_sse   += (sq_err * occ_mask).sum()
         self._val_event_count += occ_mask.sum()

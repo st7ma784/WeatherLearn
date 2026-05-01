@@ -1,11 +1,13 @@
 """
 Baseline training and evaluation on ~/rst/extracted_data cnvmap files.
 
-Two-phase workflow:
+Two-phase workflow
+------------------
   1. Preprocess: cnvmap files → batched .npy files (run once)
   2. Train: DatasetFromPresaved loads via mmap — fast, memory-efficient
 
-Usage:
+Usage
+-----
   # Step 1 — preprocess (run once per grid_size):
   python run_baseline.py --preprocess --grid_size 120 --max_files 500
 
@@ -14,6 +16,26 @@ Usage:
 
   # Combined (preprocess if needed, then train):
   python run_baseline.py --grid_size 120 --max_files 500 --epochs 20 --wandb
+
+Grid channels (6)
+-----------------
+  0  obs_vel_north  — SH-fitted northward E×B drift in radar-covered cells (m/s); zero elsewhere.
+  1  obs_vel_east   — SH-fitted eastward E×B drift in radar-covered cells (m/s); zero elsewhere.
+  2  model_vel_north — Weimer/TS96 background-model northward drift, m/s
+  3  model_vel_east  — background-model eastward drift, m/s
+  4  soft_occ        — radar coverage confidence tanh(weight/median), [0, 1]
+
+Solar-wind / CPCP conditioning (SW_FIELDS, 6 scalars)
+------------------------------------------------------
+  IMF.Bx, IMF.By, IMF.Bz  — interplanetary magnetic field components (nT)
+  IMF.Kp                   — planetary geomagnetic activity index
+  IMF.Vx                   — solar-wind bulk velocity (km/s)
+  pot.drop                 — cross-polar cap potential drop, CPCP (kV)
+  chi.sqr                  — chi-squared of the spherical harmonic fit (goodness of fit)
+
+These are injected via FiLM layers (Feature-wise Linear Modulation) at each
+encoder/decoder stage of the Pangu model, allowing the network to condition
+the convection forecast on the global geomagnetic driving state.
 """
 
 import argparse
@@ -32,80 +54,156 @@ from tqdm import tqdm
 sys.path.insert(0, os.path.dirname(__file__))
 from DataModule import DatasetFromPresaved, load_dataset_from_disk
 
-# IMF fields stored in every cnvmap record — used as solar-wind features.
-IMF_FIELDS = ["IMF.Bx", "IMF.By", "IMF.Bz", "IMF.Kp", "IMF.Vx"]
-IMF_DIM    = len(IMF_FIELDS)  # 5
+# Solar-wind / geomagnetic conditioning fields stored in every cnvmap record.
+# pot.drop is the cross-polar cap potential (CPCP in kV) — the single most
+# informative scalar for characterising how strongly the convection is driven.
+SW_FIELDS = ["IMF.Bx", "IMF.By", "IMF.Bz", "IMF.Kp", "IMF.Vx", "pot.drop", "chi.sqr"]
+SW_DIM    = len(SW_FIELDS)  # 7
+
+# Legacy alias so existing code that imports IMF_FIELDS / IMF_DIM still works.
+IMF_FIELDS = SW_FIELDS
+IMF_DIM    = SW_DIM
 
 
 # ── grid conversion ───────────────────────────────────────────────────────────
 
 def record_to_grid(record, grid_size, min_mlat=50.0, max_mlat=90.0, splat_sigma=3.0):
-    """Convert one cnvmap record → (5, G, G) float32 array (polar projection + Gaussian splat)."""
-    mlats = np.asarray(record.get("vector.mlat", []),        dtype=np.float32)
-    mlons = np.asarray(record.get("vector.mlon", []),        dtype=np.float32)
-    vels  = np.asarray(record.get("vector.vel.median", []),  dtype=np.float32)
-    pwrs  = np.asarray(record.get("vector.vel.sd", []),      dtype=np.float32)
-    wids  = np.asarray(record.get("vector.kvect", []),       dtype=np.float32)
+    """Convert one cnvmap record → (6, G, G) float32 array.
 
-    n = min(len(mlats), len(mlons), len(vels))
-    if n == 0:
-        return np.zeros((5, grid_size, grid_size), dtype=np.float32)
+    Channels
+    --------
+    0  obs_vel_north  — SH-fitted northward E×B drift in radar-covered cells (m/s),
+                        zero in unobserved cells.
+    1  obs_vel_east   — SH-fitted eastward E×B drift in radar-covered cells (m/s),
+                        zero in unobserved cells.
+    2  model_vel_north — Weimer/TS96 background-model northward drift, m/s
+    3  model_vel_east  — background-model eastward drift, m/s
+    4  soft_occ        — tanh(obs_splat_weight / median_weight), [0, 1]
+    5  boundary_dist   — signed mlat distance from Heppner-Maynard boundary (°)
 
-    in_band = (mlats[:n] >= min_mlat) & (mlats[:n] <= max_mlat)
-    if not in_band.any():
-        return np.zeros((5, grid_size, grid_size), dtype=np.float32)
-    mlats_b = mlats[:n][in_band]
-    mlons_b = mlons[:n][in_band]
-    vels_b  = vels[:n][in_band]
-    pwrs_b  = pwrs[:n][in_band] if len(pwrs) >= n else np.zeros_like(vels_b)
-    wids_b  = wids[:n][in_band] if len(wids) >= n else np.zeros_like(vels_b)
+    NOTE: vector.kvect in cnvmap files is the radar BEAM AZIMUTH (toward the radar),
+    not the plasma flow direction.  Using v_LOS * cos(beam_azimuth) gives the LOS
+    velocity projected onto geographic axes, not the true 2D E×B velocity.  Obs
+    channels are therefore derived from the SH-fitted model velocity (model.*),
+    which uses model.kvect as the true flow azimuth, masked to observed cells.
+    """
+    def _splat_vectors(mlat_arr, mlon_arr, vn_arr, ve_arr):
+        """Project and Gaussian-splat (vn, ve) onto the polar grid."""
+        n = len(mlat_arr)
+        if n == 0:
+            z = np.zeros((grid_size, grid_size), dtype=np.float32)
+            return z, z.copy(), np.zeros((grid_size, grid_size), dtype=np.float64)
 
-    vel_sum = np.zeros((grid_size, grid_size), dtype=np.float64)
-    vel_cnt = np.zeros((grid_size, grid_size), dtype=np.float64)
-    pwr_sum = np.zeros((grid_size, grid_size), dtype=np.float64)
-    wid_sum = np.zeros((grid_size, grid_size), dtype=np.float64)
+        in_band = (mlat_arr >= min_mlat) & (mlat_arr <= max_mlat) & np.isfinite(mlat_arr)
+        if not in_band.any():
+            z = np.zeros((grid_size, grid_size), dtype=np.float32)
+            return z, z.copy(), np.zeros((grid_size, grid_size), dtype=np.float64)
 
-    # Azimuthal equidistant polar projection: r=0 at pole, r=1 at min_mlat.
-    half  = (grid_size - 1) / 2.0
-    r     = (90.0 - mlats_b) / (90.0 - min_mlat)
-    theta = np.deg2rad(mlons_b % 360.0)
-    xi = np.clip(half + half * r * np.sin(theta), 0, grid_size - 1)
-    yi = np.clip(half - half * r * np.cos(theta), 0, grid_size - 1)
+        mlats_b = mlat_arr[in_band]
+        mlons_b = mlon_arr[in_band]
+        vns_b   = vn_arr[in_band]
+        ves_b   = ve_arr[in_band]
 
-    # Gaussian splat: spread each vector over a neighbourhood so that the sparse
-    # scatter of measurement points doesn't leave most grid cells empty.
-    radius = max(1, int(np.ceil(3.0 * splat_sigma)))
-    gx = np.arange(-radius, radius + 1, dtype=np.float32)
-    kernel_1d = np.exp(-0.5 * (gx / splat_sigma) ** 2)
-    kernel_2d = np.outer(kernel_1d, kernel_1d)
+        half  = (grid_size - 1) / 2.0
+        r     = (90.0 - mlats_b) / (90.0 - min_mlat)
+        theta = np.deg2rad(mlons_b % 360.0)
+        xi = np.clip(half + half * r * np.sin(theta), 0, grid_size - 1)
+        yi = np.clip(half - half * r * np.cos(theta), 0, grid_size - 1)
 
-    xi_int = np.round(xi).astype(np.int32)
-    yi_int = np.round(yi).astype(np.int32)
+        vn_sum = np.zeros((grid_size, grid_size), dtype=np.float64)
+        ve_sum = np.zeros((grid_size, grid_size), dtype=np.float64)
+        cnt    = np.zeros((grid_size, grid_size), dtype=np.float64)
 
-    for k in range(len(mlats_b)):
-        cx, cy = xi_int[k], yi_int[k]
-        x0 = cx - radius;  x1 = cx + radius + 1
-        y0 = cy - radius;  y1 = cy + radius + 1
-        gx0 = max(0, -x0);  gx1 = gx0 + min(x1, grid_size) - max(x0, 0)
-        gy0 = max(0, -y0);  gy1 = gy0 + min(y1, grid_size) - max(y0, 0)
-        ax0 = max(x0, 0);   ax1 = min(x1, grid_size)
-        ay0 = max(y0, 0);   ay1 = min(y1, grid_size)
-        if ax0 >= ax1 or ay0 >= ay1:
-            continue
-        w = kernel_2d[gy0:gy1, gx0:gx1]
-        vel_sum[ay0:ay1, ax0:ax1] += w * vels_b[k]
-        vel_cnt[ay0:ay1, ax0:ax1] += w
-        pwr_sum[ay0:ay1, ax0:ax1] += w * pwrs_b[k]
-        wid_sum[ay0:ay1, ax0:ax1] += w * wids_b[k]
+        radius    = max(1, int(np.ceil(3.0 * splat_sigma)))
+        gx        = np.arange(-radius, radius + 1, dtype=np.float32)
+        k1d       = np.exp(-0.5 * (gx / splat_sigma) ** 2)
+        kernel_2d = np.outer(k1d, k1d)
+        xi_int    = np.round(xi).astype(np.int32)
+        yi_int    = np.round(yi).astype(np.int32)
 
-    denom     = np.maximum(vel_cnt, 1e-9)
-    mean_vel  = (vel_sum / denom).astype(np.float32)
-    mean_pwr  = (pwr_sum / denom).astype(np.float32)
-    mean_wdt  = (wid_sum / denom).astype(np.float32)
-    occupancy = (vel_cnt > 1e-9).astype(np.float32)
-    density   = np.log1p(vel_cnt).astype(np.float32)
+        for k in range(len(mlats_b)):
+            cx, cy = xi_int[k], yi_int[k]
+            x0 = cx - radius;  x1 = cx + radius + 1
+            y0 = cy - radius;  y1 = cy + radius + 1
+            gx0 = max(0, -x0);  gx1 = gx0 + min(x1, grid_size) - max(x0, 0)
+            gy0 = max(0, -y0);  gy1 = gy0 + min(y1, grid_size) - max(y0, 0)
+            ax0 = max(x0, 0);   ax1 = min(x1, grid_size)
+            ay0 = max(y0, 0);   ay1 = min(y1, grid_size)
+            if ax0 >= ax1 or ay0 >= ay1:
+                continue
+            w = kernel_2d[gy0:gy1, gx0:gx1]
+            vn_sum[ay0:ay1, ax0:ax1] += w * vns_b[k]
+            ve_sum[ay0:ay1, ax0:ax1] += w * ves_b[k]
+            cnt[ay0:ay1, ax0:ax1]    += w
 
-    return np.stack([mean_vel, mean_pwr, mean_wdt, occupancy, density], axis=0)
+        denom = np.maximum(cnt, 1e-9)
+        return (vn_sum / denom).astype(np.float32), (ve_sum / denom).astype(np.float32), cnt
+
+    # ── observed radar locations (for coverage only, not velocity) ────────────
+    # vector.kvect is the radar BEAM AZIMUTH (toward the radar), not the plasma
+    # flow direction.  v_LOS * cos(beam_azimuth) gives the LOS projected onto
+    # geographic N/E — not the true 2D E×B velocity.  Use obs locations only to
+    # derive soft_occ; obs velocity comes from the SH-fitted model.* fields.
+    obs_mlats = np.asarray(record.get("vector.mlat", []), dtype=np.float32)
+    obs_mlons = np.asarray(record.get("vector.mlon", []), dtype=np.float32)
+    n_obs = min(len(obs_mlats), len(obs_mlons))
+    ones  = np.ones(n_obs, dtype=np.float32)
+    _, _, obs_cnt = _splat_vectors(obs_mlats[:n_obs], obs_mlons[:n_obs], ones, ones)
+
+    # ── background statistical model vectors ─────────────────────────────────
+    mod_mlats  = np.asarray(record.get("model.mlat", []),        dtype=np.float32)
+    mod_mlons  = np.asarray(record.get("model.mlon", []),        dtype=np.float32)
+    mod_vels   = np.asarray(record.get("model.vel.median", []),  dtype=np.float32)
+    mod_kvects = np.asarray(record.get("model.kvect", []),       dtype=np.float32)
+    n_mod = min(len(mod_mlats), len(mod_mlons), len(mod_vels))
+    if n_mod > 0:
+        kv_rad  = np.deg2rad(mod_kvects[:n_mod] if len(mod_kvects) >= n_mod
+                             else np.zeros(n_mod, dtype=np.float32))
+        mod_vn  = mod_vels[:n_mod] * np.cos(kv_rad)
+        mod_ve  = mod_vels[:n_mod] * np.sin(kv_rad)
+    else:
+        mod_vn = mod_ve = np.zeros(0, dtype=np.float32)
+
+    mod_vn_grid, mod_ve_grid, _ = _splat_vectors(
+        mod_mlats[:n_mod], mod_mlons[:n_mod], mod_vn, mod_ve)
+
+    # ── soft occupancy from observed locations ────────────────────────────────
+    median_occ = float(np.median(obs_cnt[obs_cnt > 1e-9])) if (obs_cnt > 1e-9).any() else 1.0
+    soft_occ   = np.tanh(obs_cnt / max(median_occ, 1e-9)).astype(np.float32)
+
+    # ── obs velocity channels: model velocity masked to radar coverage ─────────
+    # Uses the SH-fitted model.* velocity (physically correct) in covered cells;
+    # zero in unobserved cells so the network can distinguish coverage regions.
+    occ_mask    = (soft_occ > 0.05).astype(np.float32)
+    obs_vn_grid = mod_vn_grid * occ_mask
+    obs_ve_grid = mod_ve_grid * occ_mask
+
+    # ── Heppner-Maynard boundary distance ────────────────────────────────────
+    _bnd_mlat = record.get("boundary.mlat", [])
+    _bnd_mlon = record.get("boundary.mlon", [])
+    bnd_mlats = np.asarray(_bnd_mlat if _bnd_mlat is not None else [], dtype=np.float32)
+    bnd_mlons = np.asarray(_bnd_mlon if _bnd_mlon is not None else [], dtype=np.float32)
+    half_g = (grid_size - 1) / 2.0
+    xi_g, yi_g  = np.meshgrid(np.arange(grid_size), np.arange(grid_size))
+    dx_g = (xi_g - half_g) / half_g
+    dy_g = (half_g - yi_g) / half_g
+    pixel_mlat = (90.0 - np.sqrt(dx_g**2 + dy_g**2) * (90.0 - min_mlat)).astype(np.float32)
+    pixel_mlon = (np.rad2deg(np.arctan2(dx_g, dy_g)) % 360.0).astype(np.float32)
+
+    if len(bnd_mlats) > 0 and len(bnd_mlats) == len(bnd_mlons):
+        bnd_mlon_n = bnd_mlons % 360.0
+        sort_idx   = np.argsort(bnd_mlon_n)
+        bnd_mlon_s = bnd_mlon_n[sort_idx]
+        bnd_mlat_s = bnd_mlats[sort_idx]
+        mlon_w = np.concatenate([bnd_mlon_s - 360, bnd_mlon_s, bnd_mlon_s + 360])
+        mlat_w = np.concatenate([bnd_mlat_s,        bnd_mlat_s, bnd_mlat_s])
+        bnd_interp    = np.interp(pixel_mlon.ravel(), mlon_w, mlat_w).reshape(grid_size, grid_size)
+        boundary_dist = (pixel_mlat - bnd_interp).astype(np.float32)
+    else:
+        boundary_dist = np.zeros((grid_size, grid_size), dtype=np.float32)
+
+    return np.stack([obs_vn_grid, obs_ve_grid, mod_vn_grid, mod_ve_grid,
+                     soft_occ, boundary_dist], axis=0)
 
 
 # ── preprocessing ─────────────────────────────────────────────────────────────
@@ -139,7 +237,7 @@ def preprocess_to_disk(cnvmap_dir, out_dir, grid_size, max_files=None, chunk_siz
                 np.stack(buf_imf).astype(np.float32))
 
     def extract_imf(record):
-        return np.array([float(record.get(f, 0.0)) for f in IMF_FIELDS],
+        return np.array([float(record.get(f, 0.0)) for f in SW_FIELDS],
                         dtype=np.float32)
 
     for fname in tqdm(files, desc="cnvmap→npy"):
@@ -168,7 +266,8 @@ def preprocess_to_disk(cnvmap_dir, out_dir, grid_size, max_files=None, chunk_siz
     if bufA:
         flush(bufA, bufB, bufIMF, chunk_idx)
 
-    shape = [-1, 5, grid_size, grid_size]
+    # 6 channels: obs_vel_north, obs_vel_east, model_vel_north, model_vel_east, soft_occ, boundary_dist
+    shape = [-1, 6, grid_size, grid_size]
     with open(os.path.join(out_dir, "shape.txt"), "w") as f:
         f.write(str(shape))
 
@@ -200,7 +299,7 @@ def extract_imf_to_disk(cnvmap_dir, out_dir, max_files=None, chunk_size=200):
             np.save(path, np.stack(b).astype(np.float32))
 
     def extract_imf(record):
-        return np.array([float(record.get(f, 0.0)) for f in IMF_FIELDS],
+        return np.array([float(record.get(f, 0.0)) for f in SW_FIELDS],
                         dtype=np.float32)
 
     for fname in tqdm(files, desc="cnvmap→imf"):
@@ -343,7 +442,7 @@ class PresavedDataModule(pl.LightningDataModule):
             full, [n_train, n_val],
             generator=torch.Generator().manual_seed(42))
 
-        solar_dim = IMF_DIM if (self.use_solar and imf_files) else 0
+        solar_dim = SW_DIM if (self.use_solar and imf_files) else 0
         print(f"  train: {n_train:,}  val: {n_val:,}  solar_dim: {solar_dim}")
         print(f"  x_in mean (agg):  {stats['x_mean'].round(4)}")
         print(f"  x_in std  (agg):  {stats['x_std'].round(4)}")
