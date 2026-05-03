@@ -456,7 +456,7 @@ class Pangu(pl.LightningModule):
         self.noise_factor=kwargs.get("noise_factor",0.1)
         self.weight_decay = kwargs.get("weight_decay", 0.05)
         self.use_ema = kwargs.get("use_ema", True)
-        self.use_ema_eval = kwargs.get("use_ema_eval", False)
+        self.use_ema_eval = kwargs.get("use_ema_eval", True)
         self.ema_decay = float(kwargs.get("ema_decay", 0.999))
         self.ema_warmup_steps = int(kwargs.get("ema_warmup_steps", 200))
         self.ema_shadow = {}
@@ -956,19 +956,24 @@ class Pangu(pl.LightningModule):
             curve.append((h, float(mse.item())))
         return curve
 
-    def _weighted_loss(self, y_hat, y):
+    def _weighted_loss(self, y_hat, y, y_full=None):
         error    = F.smooth_l1_loss(y_hat, y, reduction='none', beta=0.1)
-        weighted = error * self.channel_weights  # (B, 5, H, W)
+        weighted = error * self.channel_weights  # (B, 6, H, W)
 
-        # Channel layout: [obs_vn, obs_ve, mod_vn, mod_ve, soft_occ]
+        # Channel layout: [obs_vn, obs_ve, mod_vn, mod_ve, soft_occ, bnd_dist]
         # Observed velocity channels (0-1): only supervise radar-covered cells so that
         # empty-region boundary shifts don't dominate the gradient.
-        # Background model + soft_occ (2-4): always supervise — the model covers the
-        # full polar cap and should be predicted everywhere.
-        occ_mask   = (y[:, 4:5] > 0.1).float()                        # (B, 1, H, W)
+        # Background model + soft_occ + bnd_dist (2-5): always supervise — full polar cap.
+        #
+        # IMPORTANT: use the actual target frame (y_full) for the occupancy mask, NOT the
+        # delta (y = delta_target).  delta_target[:, 4] measures *change* in soft_occ
+        # between frames, which is near-zero in steady conditions and would zero out the
+        # gradient for channels 0-1 almost everywhere.
+        occ_src    = y_full if y_full is not None else y
+        occ_mask   = (occ_src[:, 4:5] > 0.0).float()                  # (B, 1, H, W)
         obs_weight = occ_mask.expand_as(weighted[:, :2])               # (B, 2, H, W)
-        bg_weight  = torch.ones_like(weighted[:, 2:])                  # (B, 3, H, W)
-        all_weight = torch.cat([obs_weight, bg_weight], dim=1)         # (B, 5, H, W)
+        bg_weight  = torch.ones_like(weighted[:, 2:])                  # (B, 4, H, W)
+        all_weight = torch.cat([obs_weight, bg_weight], dim=1)         # (B, 6, H, W)
         return (weighted * all_weight).sum() / all_weight.sum().clamp(min=1.0)
 
     def _unpack_solar(self, batch):
@@ -1001,7 +1006,7 @@ class Pangu(pl.LightningModule):
         x = x.flatten(2, 3).transpose(1, 2)
         delta_hat = self._decode_from_latent(
             self._forecast_latent(x, add_noise=True, solar_vec=solar_vec, solar_mask=solar_mask))
-        loss = self._weighted_loss(delta_hat, delta_target)
+        loss = self._weighted_loss(delta_hat, delta_target, y_full=y)
         y_hat = x_last + delta_hat
         mse = self.metric_mse(y_hat, y)
         self.log('train_loss', loss, on_epoch=True, prog_bar=True)
@@ -1043,7 +1048,7 @@ class Pangu(pl.LightningModule):
         x = x.flatten(2, 3).transpose(1, 2)
         latent = self._forecast_latent(x, add_noise=False, solar_vec=solar_vec, solar_mask=solar_mask)
         delta_hat = self._decode_from_latent(latent)
-        loss = self._weighted_loss(delta_hat, y - x_last)
+        loss = self._weighted_loss(delta_hat, y - x_last, y_full=y)
         y_hat = x_last + delta_hat
         mse = self.metric_mse(y_hat, y)
 
@@ -1116,7 +1121,7 @@ class Pangu(pl.LightningModule):
         x = x.flatten(2, 3).transpose(1, 2)
         delta_hat = self._decode_from_latent(
             self._forecast_latent(x, add_noise=False, solar_vec=solar_vec, solar_mask=solar_mask))
-        loss = self._weighted_loss(delta_hat, y - x_last)
+        loss = self._weighted_loss(delta_hat, y - x_last, y_full=y)
         mse = self.metric_mse(x_last + delta_hat, y)
         self.log('test_loss', loss, on_epoch=True, prog_bar=True)
         self.log('test_mse', mse, on_epoch=True, prog_bar=True)

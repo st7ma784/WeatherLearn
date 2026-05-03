@@ -1040,11 +1040,10 @@ class DatasetFromPresaved(Dataset):
             else:
                 raw = raw_all  # (num_input_frames, 5, H, W)
 
-            # Occupancy mask: keep cells observed in ANY input slot (union), not all (intersection).
-            # Intersection was zeroing out intermittently-active cells and compounding sparsity.
-            if self.num_input_frames > 1:
-                observed_anywhere = (raw[:, 4] > 0.5).any(axis=0)  # (H, W) — channel 4 is soft_occ
-                raw *= observed_anywhere.astype(raw.dtype)
+            # NOTE: Do NOT mask physics channels (2-5) based on occupancy.
+            # Channels 0-1 (obs vel) are already zero in unobserved cells by construction.
+            # Channels 2-5 (model vel, soft_occ, boundary_dist) have full polar-cap coverage
+            # and must not be zeroed — they are the physics prior the network learns from.
 
             # Normalise all frames in one tensor op; x_mean/x_std are (5,1,1)
             # and broadcast correctly over the leading num_input_frames dimension.
